@@ -12,6 +12,7 @@ import { createServer } from '../src/server.js'
 import { parseTargets } from '../src/target.js'
 import { readTargetStoreStrict } from '../src/store.js'
 import { ensureControlMaster } from '../src/ssh.js'
+import { remoteCommand } from './helpers.mjs'
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url))
 const fakeSsh = `#!/usr/bin/env node
@@ -189,7 +190,7 @@ test('MCP cancellation reaches the SSH subprocess', async () => fixture(async ({
   try {
     for (let i = 0; i < 100; i++) {
       const calls = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
-      pid = calls.find(row => row.argv.at(-1).includes('sleep 1.5'))?.pid
+      pid = calls.find(row => remoteCommand(row.argv).includes('sleep 1.5'))?.pid
       if (pid) break
       await delay(10)
     }

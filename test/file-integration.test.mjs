@@ -15,7 +15,9 @@ async function withLocalSsh(run) {
 const { spawnSync } = require('node:child_process')
 const { writeFileSync } = require('node:fs')
 const command = process.argv.at(-1)
-if (command.startsWith('if base64') && process.env.REMOTE_SSH_TEST_CONFLICT_FILE) {
+const encoded = command.match(/printf %s ([A-Za-z0-9+/=]+) \\| base64 -d/)
+const script = encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : command
+if (script.startsWith('if base64') && process.env.REMOTE_SSH_TEST_CONFLICT_FILE) {
   writeFileSync(process.env.REMOTE_SSH_TEST_CONFLICT_FILE, 'concurrent edit with a different size')
 }
 const result = spawnSync('bash', ['-c', command], { stdio: 'inherit', cwd: ${JSON.stringify(dir)} })

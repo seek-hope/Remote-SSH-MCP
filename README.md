@@ -81,6 +81,20 @@ node src/cli.js --help
 
 自定义配置文件可追加 `--targets /absolute/path/to/targets.json`。服务没有构建步骤，stdout 仅用于 MCP 协议，错误输出到 stderr。SDK 接入方式参考[官方 stdio 文档](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/get-started/first-server.md)。
 
+## Linux SSH 兼容范围
+
+**能用 `ssh` 登录，不等于能运行全部 MCP 工具。** 本服务使用 SSH 的非交互命令通道；远端必须允许执行命令，并提供 `sh`、`base64` 和目标目录访问权限。完整功能还需要安装说明中的 bash、Python 和 GNU 工具，后台任务依赖 Linux `/proc`。只有 SFTP、仅允许交互式 TTY、强制菜单或受限命令的账户，不能当作通用远程工作区使用；本服务不会绕过服务器权限限制。原生 Windows、macOS 远端不在当前支持范围内。
+
+连接复用本机 OpenSSH 配置，包括 `Host` 别名、`HostName`、`User`、端口、`IdentityFile`、证书、`IdentityAgent`、`ProxyJump`、`ProxyCommand` 和认证方式。若平时通过 `ssh -i ... -J ... -p ...` 登录，将这些设置写入 `~/.ssh/config` 的独立别名，再把别名作为目标的 `ssh` 字段；该字段不接受整条 shell 命令，也不接受密码。
+
+MCP 命令通道会关闭 `RemoteCommand`、TTY、标准输入丢弃和自动后台化，避免登录时自动运行 tmux 等命令或 `StdinNull` 破坏文件传输；也会清除本次连接的端口转发，避免与已有 SSH 会话争用端口，但保留 `ProxyJump` / `ProxyCommand` 路由。不会修改你的 SSH 配置文件或已有转发。若 `RemoteCommand` 原本用于进入容器或另一台机器，请为 MCP 配置直接到达目标环境的 SSH 别名。
+
+远端脚本编码为单行后由 POSIX `sh` 解码执行，避免依赖默认登录 shell 的多行语法、引号或历史展开规则；文件内容仍走标准输入。非交互 shell 的启动脚本不要向 stdout 打印欢迎语等额外内容，以免污染结构化结果。
+
+密码、私钥口令及 keyboard-interactive/二次认证由新终端中的 OpenSSH 处理，需要本机有可用桌面会话。自动探测的终端若启动后立即失败，会尝试下一个；显式指定 `REMOTE_SSH_TERMINAL` 时直接报告启动错误。禁用连接复用或没有桌面终端时，需要先配置可用的免交互密钥／Agent 认证。
+
+SSH 配置项的原生语义参见 [OpenSSH 官方手册](https://man.openbsd.org/ssh_config)。主机指纹验证保持开启，不自动接受未知或变化的主机密钥，也不自动启用旧的加密算法。
+
 ## 认证：用户在新终端输入
 
 1. 检查该目标是否已有可复用的 ControlMaster。
@@ -195,7 +209,7 @@ SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为属于自�
 npm test
 ```
 
-使用 Node 自带测试运行器。覆盖 MCP 新旧协议握手、工具参数、显式目标路由、配置增删改、终端认证复用、取消传递、文件读写、配置锁和后台任务生命周期。测试通过模拟 SSH 执行临时目录中的命令，不连接实际远端；真实桌面弹窗和真实服务器认证仍需在使用环境验证。
+使用 Node 自带测试运行器。覆盖 MCP 新旧协议握手、工具参数、显式目标路由、配置增删改、终端认证复用、取消传递、文件读写、配置锁和后台任务生命周期。兼容性回归额外使用本机 `ssh -G` 检查登录配置隔离、身份与跳板路由保留，并验证单行脚本传输和终端启动失败处理。测试通过模拟 SSH 执行临时目录中的命令，不连接实际远端；真实桌面弹窗和真实服务器认证仍需在使用环境验证。
 
 ## 许可证
 

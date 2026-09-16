@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { makeReadTool, makeWriteTool, makeEditTool } from '../src/tools/files.js'
-import { installFakeSsh } from './helpers.mjs'
+import { installFakeSsh, remoteCommand } from './helpers.mjs'
 
 const MiB = 1024 * 1024
 const target = { ssh: 'h', name: 'h', controlPersist: 0 }
@@ -96,7 +96,7 @@ test('write is atomic: base64 into a temp file, then mv -f over the target', asy
     const r = await write.execute({ file_path: '/f', content: 'hello' }, exec)
     assert.match(r, /File written to remote host h: \/f/)
     const calls = await fake.readLog()
-    const cmd = calls[calls.length - 1].at(-1)
+    const cmd = remoteCommand(calls.at(-1))
     assert.match(cmd, /base64 -d > '\/f\.remote-ssh-tmp-[0-9a-f-]+'/, `temp-file decode: ${cmd}`)
     assert.match(cmd, /mv -f '\/f\.remote-ssh-tmp-[0-9a-f-]+' '\/f'/, `atomic rename: ${cmd}`)
     assert.match(cmd, /chmod --reference='\/f'/, `permission carry-over: ${cmd}`)
@@ -114,8 +114,8 @@ test('edit write-back carries the read-time mtime/size guard (TOCTOU)', async ()
     assert.match(r, /Edited remote host h: \/f/)
     const calls = await fake.readLog()
     assert.equal(calls.length, 2, 'one read + one guarded write-back')
-    assert.match(calls[0].at(-1), /stat -c '%Y %s' -- '\/f'/, 'read probe stats the file')
-    const writeBack = calls[1].at(-1)
+    assert.match(remoteCommand(calls[0]), /stat -c '%Y %s' -- '\/f'/, 'read probe stats the file')
+    const writeBack = remoteCommand(calls[1])
     assert.match(writeBack, /\[ "\$\(stat -c '%Y %s' -- '\/f' 2>\/dev\/null\)" = '1700000000 5' \]/, `mtime/size guard: ${writeBack}`)
     assert.match(writeBack, /mv -f '\/f\.remote-ssh-tmp-[0-9a-f-]+' '\/f'/, `atomic rename: ${writeBack}`)
     assert.match(writeBack, /__REMOTE_SSH_CHANGED__/, 'TOCTOU marker present')

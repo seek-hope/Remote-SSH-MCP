@@ -25,6 +25,14 @@ const masterWarmers = new Map()
 const recentWarmFailures = new Map()
 const WARM_FAILURE_RETRY_MS = 30_000
 
+// Keep host/key/proxy settings, but do not inherit interactive login commands
+// or rebind forwarded ports on every MCP call. Older clients lack the newer
+// session options (and cannot have those options in their config either).
+const SESSION_ARGS = [
+  '-o', 'IgnoreUnknown=RemoteCommand,SessionType,StdinNull,ForkAfterAuthentication',
+  '-o', 'RemoteCommand=none', '-o', 'ClearAllForwardings=yes',
+]
+
 /** Create the ControlPath directory once per process (and keep it private). */
 async function ensureControlDir() {
   await mkdir(controlDir(), { recursive: true, mode: 0o700 })
@@ -62,10 +70,17 @@ async function sshSpawn(opts, command) {
   const ctl = controlArgs({ controlPersist })
   if (effectiveControlPersist(opts) > 0) await ensureControlDir()
   const portOptionArgs = portArgs({ port })
+  // A single ASCII argument also survives csh/tcsh newline/history quoting.
+  // Decode inside POSIX sh without consuming the command's stdin payload.
+  const encoded = Buffer.from(command, 'utf8').toString('base64')
+  const script = `remote_ssh_script=$(printf %s ${encoded} | base64 -d) && eval "$remote_ssh_script"`
   return {
     command: 'ssh',
     // `--` ends option parsing so a destination can never be read as an option.
-    args: ['-T', '-o', 'ConnectTimeout=15', '-o', 'LogLevel=ERROR', '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes', ...ctl, ...portOptionArgs, '--', target, command],
+    args: ['-T', ...SESSION_ARGS,
+      '-o', 'SessionType=default', '-o', 'StdinNull=no', '-o', 'ForkAfterAuthentication=no',
+      '-o', 'ConnectTimeout=15', '-o', 'LogLevel=ERROR', '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes',
+      ...ctl, ...portOptionArgs, '--', target, `sh -c ${shq(script)}`],
   }
 }
 
@@ -513,6 +528,7 @@ export function buildConnectCommand(target) {
   if (seconds <= 0) return undefined
   const args = [
     'ssh', '-T',
+    ...SESSION_ARGS,
     '-o', 'ConnectTimeout=20',
     '-o', 'LogLevel=ERROR',
     '-o', 'ControlMaster=yes',
@@ -557,10 +573,22 @@ function splitShellWords(s) {
 function spawnDetached(bin, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { detached: true, stdio: 'ignore', env: { ...process.env, SSH_ASKPASS_REQUIRE: 'never' } })
-    child.once('error', reject)
-    child.once('spawn', () => {
+    let timer
+    let settled = false
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       child.unref()
-      resolve(bin)
+      if (error) reject(error)
+      else resolve(bin)
+    }
+    child.once('error', finish)
+    child.once('exit', (code, signal) => finish(code === 0 ? undefined : new Error(`${bin} exited with ${signal ?? `exit code ${code}`}`)))
+    child.once('spawn', () => {
+      // ponytail: catch immediate launcher failures; the ControlMaster poll
+      // remains the proof of authentication if a GUI fails after this window.
+      timer = setTimeout(() => finish(), 250)
     })
   })
 }

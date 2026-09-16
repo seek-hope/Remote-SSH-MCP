@@ -47,7 +47,8 @@ test('ensureControlMaster starts the master with the destination string, not the
     const dash = probe.indexOf('--')
     assert.ok(dash !== -1, 'expected "--" in the probe argv')
     assert.equal(probe[dash + 1], 'fake-host')
-    assert.equal(probe[dash + 2], 'true')
+    assert.match(probe[dash + 2], /^sh -c /)
+    assert.ok(probe[dash + 2].includes(Buffer.from('true').toString('base64')))
   } finally {
     delete process.env.FAKE_SSH_LOG
     delete process.env.REMOTE_SSH_CONTROL_DIR

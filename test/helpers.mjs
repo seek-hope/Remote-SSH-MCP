@@ -7,16 +7,25 @@ import { mkdtemp, writeFile, chmod, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+export function remoteCommand(argv) {
+  const outer = argv.at(-1) || ''
+  const encoded = outer.match(/printf %s ([A-Za-z0-9+/=]+) \| base64 -d/)
+  return encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : outer
+}
+
 const FAKE_SSH = `#!/usr/bin/env node
 // Synchronous fd writes: process.stdout.write + process.exit can drop the tail
 // of a large stream before the pipe drains, which would corrupt the test.
 const fs = require('node:fs')
 const argv = process.argv.slice(2)
 if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
+const outer = argv.at(-1) || ''
+const encoded = outer.match(/printf %s ([A-Za-z0-9+/=]+) \\| base64 -d/)
+const wrapped = encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : outer
 // Selective failure: invocations whose argv contains FAKE_SSH_FAIL_MATCH exit
 // with FAKE_SSH_FAIL_EXIT and optional FAKE_SSH_FAIL_STDERR (others proceed).
 const failMatch = process.env.FAKE_SSH_FAIL_MATCH
-if (failMatch && argv.join('\\n').includes(failMatch)) {
+if (failMatch && (argv.join('\\n') + '\\n' + wrapped).includes(failMatch)) {
   if (process.env.FAKE_SSH_FAIL_STDERR) fs.writeSync(2, process.env.FAKE_SSH_FAIL_STDERR)
   process.exit(Number(process.env.FAKE_SSH_FAIL_EXIT || '1'))
 }
@@ -31,7 +40,6 @@ if (process.env.FAKE_SSH_STDOUT) {
   // __SEP__ is replaced by the read tool's per-call separator, extracted from
   // the wrapped remote command (mirrors the FAKE_SSH_MARK mechanism).
   let out = process.env.FAKE_SSH_STDOUT
-  const wrapped = argv[argv.length - 1] || ''
   const sep = wrapped.match(/__REMOTE_SSH_SEP_[0-9a-f]+__/)?.[0]
   if (sep) out = out.split('__SEP__').join(sep)
   fs.writeSync(1, out)
@@ -39,7 +47,6 @@ if (process.env.FAKE_SSH_STDOUT) {
 if (process.env.FAKE_SSH_MARK) {
   // sshRun's marker is random per call and embedded in the wrapped command;
   // echo that exact marker back so the exit code rides the expected line.
-  const wrapped = argv[argv.length - 1] || ''
   const marker = wrapped.match(/__REMOTE_SSH_EXIT_[0-9a-f-]+__/)?.[0] || '__REMOTE_SSH_EXIT__'
   fs.writeSync(1, marker + process.env.FAKE_SSH_MARK + '\\n')
 }
