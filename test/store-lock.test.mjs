@@ -484,12 +484,13 @@ test('an acquirer waits out a gate that appears around its create, then confirms
   const file = join(dir, 'targets.json')
   await saveTargetStore(file, [])
   let armed = false
-  _lockTestHooks.writeOwner = async (lockPath, token) => {
+  _lockTestHooks.writeOwner = async (staging, token, lockPath) => {
     if (armed) return
     armed = true
-    // The real owner write, then a recovery gate springs up right after our
-    // record lands but before the acquirer can trust the lock.
-    await writeFile(join(lockPath, OWNER), `${JSON.stringify({ token, pid: process.pid, at: new Date().toISOString() })}\n`, 'utf8')
+    // The real owner write (into our private staging dir), then a recovery
+    // gate springs up at the canonical path right after our record lands but
+    // before the acquirer can trust the published lock.
+    await writeFile(join(staging, OWNER), `${JSON.stringify({ token, pid: process.pid, at: new Date().toISOString() })}\n`, 'utf8')
     const gatePath = `${lockPath}.recover`
     await mkdir(gatePath)
     await writeFile(join(gatePath, OWNER), `${JSON.stringify({ token: 'slow.recoverer', pid: process.pid })}\n`, 'utf8')
@@ -511,10 +512,10 @@ test('a WEDGED live gate bounds even a verified acquisition (own verified lock g
   const file = join(dir, 'targets.json')
   await saveTargetStore(file, [])
   let armed = false
-  _lockTestHooks.writeOwner = async (lockPath, token) => {
+  _lockTestHooks.writeOwner = async (staging, token, lockPath) => {
     if (armed) return
     armed = true
-    await writeFile(join(lockPath, OWNER), `${JSON.stringify({ token, pid: process.pid, at: new Date().toISOString() })}\n`, 'utf8')
+    await writeFile(join(staging, OWNER), `${JSON.stringify({ token, pid: process.pid, at: new Date().toISOString() })}\n`, 'utf8')
     // A gate whose holder never finishes: the bounded wait must win.
     const gatePath = `${lockPath}.recover`
     await mkdir(gatePath)

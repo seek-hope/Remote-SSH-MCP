@@ -9,7 +9,8 @@
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
     "start": "node src/cli.js",
-    "test": "node --test --test-timeout=30000 test/*.test.mjs"
+    "test": "node --test --test-timeout=30000 test/*.test.mjs",
+    "verify": "formal/run.sh"
   },
   "engines": { "node": ">=20" },
   "dependencies": {

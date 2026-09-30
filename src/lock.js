@@ -2,18 +2,20 @@
  * lock.js — cross-process locking for the target store (Node stdlib only).
  *
  * Mutations go through withStoreLock, which is safe across PROCESSES: the
- * lock is the DIRECTORY `<store>.lock` (atomic mkdir on POSIX and Windows)
- * holding an `owner` record (random token + pid). Recovery of a dead holder's
- * lock follows a gate protocol:
+ * lock is the DIRECTORY `<store>.lock` holding an `owner` record (random
+ * token + pid). Acquisition builds the lock in a PRIVATE staging directory and
+ * publishes it with an atomic `rename`, so the canonical path never exists
+ * without a complete owner record; a stalled creator cannot write into a
+ * successor's directory (this closed a real race found by the TLA+ model in
+ * formal/LockHuskRace.tla). Recovery of a dead holder's lock follows a gate
+ * protocol:
  *
  *   - A lock with a valid owner record whose pid is ALIVE is never broken,
  *     no matter how old it is (a wedged holder surfaces as a bounded-wait
  *     timeout instead of a stolen lock).
- *   - A lock with no valid record (crash between mkdir and the owner write)
- *     is broken only after a short mtime grace that absorbs in-flight
- *     creates; an acquirer re-reads the owner record after writing it and
- *     backs off unless its own token is on disk, so a lock removed under an
- *     in-flight create is retried, never double-held.
+ *   - A lock with no valid record (a legacy/abandoned husk) is broken only
+ *     after a short mtime grace; publish replaces such an empty husk atomically
+ *     once aging has made it recoverable.
  *   - Breaking happens under the recovery gate `<store>.lock.recover`, which
  *     follows the same rules as the lock itself: a gate whose recorded pid is
  *     ALIVE is never stolen for age, an ownerless gate (crash between mkdir
@@ -260,28 +262,39 @@ async function acquireStoreLock(file, opts) {
     // and don't start a competing recovery underneath an in-flight verdict.
     // Dead/aged gates fall through so the recovery below can take them over.
     if (!(await gateLive(gatePath))) {
-      try {
-        await mkdir(lockPath)
-        created = true
-      } catch (e) {
-        if (e?.code !== 'EEXIST') throw e // e.g. EACCES: not a contention problem
+      const verdict = await judgeLock(lockPath, opts.graceMs)
+      if (verdict !== 'held') {
+        // Build the lock PRIVATELY, owner record included, then publish it with
+        // an atomic rename. The canonical path therefore only ever appears with
+        // a complete owner record: a creator that stalls between mkdir and the
+        // owner write targets its own staging directory, never the shared path,
+        // so it can no longer overwrite a successor's lock.
+        const staging = `${lockPath}.staging.${token}`
+        try {
+          await mkdir(staging)
+          try {
+            await (_lockTestHooks.writeOwner ?? writeOwnerRecord)(staging, token, lockPath)
+          } catch (e) {
+            await rm(staging, { recursive: true, force: true }).catch(() => {})
+            throw e // a private-write failure is a real error, not contention
+          }
+          try {
+            await rename(staging, lockPath)
+            created = true
+          } catch (e) {
+            await rm(staging, { recursive: true, force: true }).catch(() => {})
+            // A non-empty or non-directory target means somebody else published
+            // first; Windows also reports an existing empty directory here.
+            if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'].includes(e?.code)) throw e
+          }
+        } catch (e) {
+          if (e?.code !== 'EEXIST') throw e // staging collision (practically impossible: token is unique)
+        }
       }
       if (created) {
-        try {
-          await (_lockTestHooks.writeOwner ?? writeOwnerRecord)(lockPath, token)
-        } catch (e) {
-          if (e?.code !== 'ENOENT') {
-            // Owner-write failure: clean up our empty lock so nobody waits on a
-            // husk, then surface the error (the mutation can be retried).
-            await rm(lockPath, { recursive: true, force: true }).catch(() => {})
-            throw e
-          }
-          // ENOENT: the lock dir vanished under us (another process recovered
-          // it mid-create) — not ours; fall through to the retry below.
-        }
         const rec = await readOwnerRecord(lockPath)
         if (rec?.token === token) {
-          // A gate that appeared around our create may hold a verdict taken
+          // A gate that appeared around our publish may hold a verdict taken
           // BEFORE our owner record landed; wait it out, then re-confirm our
           // token is still on disk before trusting the lock.
           while (await gateLive(gatePath)) {
@@ -294,10 +307,8 @@ async function acquireStoreLock(file, opts) {
           const confirmed = await readOwnerRecord(lockPath)
           if (confirmed?.token === token) return { lockPath, token }
         }
-      } else {
-        if (await judgeLock(lockPath, opts.graceMs) === 'stale') {
-          await recoverLock(lockPath, gatePath, token, opts.graceMs)
-        }
+      } else if (verdict === 'stale') {
+        await recoverLock(lockPath, gatePath, token, opts.graceMs)
       }
     }
     if (Date.now() >= deadline) {
