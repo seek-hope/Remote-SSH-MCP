@@ -42,6 +42,7 @@ if (process.env.FAKE_SSH_STDOUT) {
   let out = process.env.FAKE_SSH_STDOUT
   const sep = wrapped.match(/__REMOTE_SSH_SEP_[0-9a-f]+__/)?.[0]
   if (sep) out = out.split('__SEP__').join(sep)
+  out = out.split('__NUL__').join('\0')
   fs.writeSync(1, out)
 }
 if (process.env.FAKE_SSH_MARK) {

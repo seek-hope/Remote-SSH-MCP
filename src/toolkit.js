@@ -1,15 +1,10 @@
 /**
- * toolkit.js — shared definitions for the remote text tools.
+ * toolkit.js — shared definitions for the remote workspace tools.
  *
- * The MCP adapter publishes and validates the JSON schemas through Zod.
- * checkArgs also protects direct callers of these reusable tools.
+ * The MCP adapter (server.js) publishes the JSON schemas through Zod.
+ * checkArgs only backstops DIRECT callers (tests import the make*Tool
+ * factories); on the MCP path Zod has already validated every argument.
  */
-
-/** Canonical output: one text block. */
-export const textOutput = {
-  schema: { type: 'string' },
-  render: (_args, value) => [{ type: 'text', text: String(value) }],
-}
 
 /**
  * Validate args against a tiny spec: { field: 'string'|'number'|'boolean'|'?string'|... }.
@@ -38,16 +33,7 @@ export function checkArgs(toolName, args, spec) {
   return out
 }
 
-/** Build a raw ToolDefinition with text output. */
-export function defTextTool({ name, description, parameters, execute, timeoutMs }) {
-  return {
-    name,
-    description,
-    parameters,
-    output: textOutput,
-    timeoutMs,
-    async execute(args, exec) {
-      return execute(args, exec)
-    },
-  }
+/** Build the tool definition consumed by the MCP adapter in server.js. */
+export function defTextTool({ name, description, parameters, execute }) {
+  return { name, description, parameters, execute }
 }

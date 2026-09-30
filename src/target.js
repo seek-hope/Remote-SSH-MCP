@@ -1,8 +1,8 @@
 import { posix } from 'node:path'
 import * as z from 'zod/v4'
 
-export const DEFAULT_CONTROL_PERSIST_SECONDS = 43_200
-export const MAX_CONTROL_PERSIST_SECONDS = 31_536_000
+const DEFAULT_CONTROL_PERSIST_SECONDS = 43_200
+const MAX_CONTROL_PERSIST_SECONDS = 31_536_000
 
 export const targetFields = {
   name: z.string().trim().min(1).optional().describe('Unique target name; defaults to the SSH destination.'),

@@ -16,6 +16,7 @@ const FAKE_SSH = `#!/usr/bin/env node
 const fs = require('node:fs')
 const argv = process.argv.slice(2)
 if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
+if (argv.includes('-G')) { console.log('controlpath ' + process.env.REMOTE_SSH_CONTROL_DIR + '/fake'); process.exit(0) }
 if (argv.includes('-O')) {
   fs.writeSync(2, 'Control socket connect(...): No such file or directory')
   process.exit(255) // no master yet -> exercise the headless start path
@@ -42,7 +43,7 @@ test('ensureControlMaster starts the master with the destination string, not the
     assert.equal(result.mode, 'started')
 
     const calls = JSON.parse(`[${(await readFile(log, 'utf8')).trim().split('\n').join(',')}]`)
-    const probe = calls.find((argv) => !argv.includes('-O'))
+    const probe = calls.find((argv) => !argv.includes('-O') && !argv.includes('-G'))
     assert.ok(probe, 'expected the headless sshExec probe')
     const dash = probe.indexOf('--')
     assert.ok(dash !== -1, 'expected "--" in the probe argv')

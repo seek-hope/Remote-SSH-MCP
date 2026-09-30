@@ -108,15 +108,15 @@ test('write is atomic: base64 into a temp file, then mv -f over the target', asy
 test('edit write-back carries the read-time mtime/size guard (TOCTOU)', async () => {
   const fake = await installFakeSsh()
   // every fake-ssh call answers the read probe: '<mtime> <size>' + base64('hello')
-  process.env.FAKE_SSH_STDOUT = `1700000000 5\n${Buffer.from('hello').toString('base64')}\n`
+  process.env.FAKE_SSH_STDOUT = `2026-01-01 00:00:00.000000000 +0000 5\n${Buffer.from('hello').toString('base64')}\n`
   try {
     const r = await edit.execute({ file_path: '/f', old_string: 'hello', new_string: 'bye' }, exec)
     assert.match(r, /Edited remote host h: \/f/)
     const calls = await fake.readLog()
     assert.equal(calls.length, 2, 'one read + one guarded write-back')
-    assert.match(remoteCommand(calls[0]), /stat -c '%Y %s' -- '\/f'/, 'read probe stats the file')
+    assert.match(remoteCommand(calls[0]), /stat -c '%y %s' -- '\/f'/, 'read probe stats the file')
     const writeBack = remoteCommand(calls[1])
-    assert.match(writeBack, /\[ "\$\(stat -c '%Y %s' -- '\/f' 2>\/dev\/null\)" = '1700000000 5' \]/, `mtime/size guard: ${writeBack}`)
+    assert.match(writeBack, /\[ "\$\(stat -c '%y %s' -- '\/f' 2>\/dev\/null\)" = '2026-01-01 00:00:00.000000000 \+0000 5' \]/, `mtime/size guard: ${writeBack}`)
     assert.match(writeBack, /mv -f '\/f\.remote-ssh-tmp-[0-9a-f-]+' '\/f'/, `atomic rename: ${writeBack}`)
     assert.match(writeBack, /__REMOTE_SSH_CHANGED__/, 'TOCTOU marker present')
   } finally {
@@ -129,7 +129,7 @@ test('edit reports a TOCTOU conflict with a re-read instruction', async () => {
   const fake = await installFakeSsh()
   // the read probe answers normally; the write-back (the call carrying mv)
   // fails the mtime/size guard with the marker on stderr
-  process.env.FAKE_SSH_STDOUT = `1700000000 5\n${Buffer.from('hello').toString('base64')}\n`
+  process.env.FAKE_SSH_STDOUT = `2026-01-01 00:00:00.000000000 +0000 5\n${Buffer.from('hello').toString('base64')}\n`
   process.env.FAKE_SSH_FAIL_MATCH = 'mv -f'
   process.env.FAKE_SSH_FAIL_EXIT = '4'
   process.env.FAKE_SSH_FAIL_STDERR = '__REMOTE_SSH_CHANGED__: /f changed on the remote host during the edit'

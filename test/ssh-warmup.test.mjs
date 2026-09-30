@@ -17,6 +17,7 @@ const FAKE_SSH = `#!/usr/bin/env node
 const fs = require('node:fs')
 const argv = process.argv.slice(2)
 if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
+if (argv.includes('-G')) { console.log('controlpath ' + process.env.REMOTE_SSH_CONTROL_DIR + '/fake'); process.exit(0) }
 if (argv.includes('-O')) {
   process.exit(255) // no master yet
 }
@@ -64,12 +65,12 @@ for (const interactive of [false, true]) test(`caller cancellation preserves sha
     let b
     let ra
     try {
-      await waitForCalls(log, calls => calls.some(argv => !argv.includes('-O')))
+      await waitForCalls(log, calls => calls.some(argv => !argv.includes('-O') && !argv.includes('-G')))
       ctrlA.abort()
       ra = await a
       // The later caller arrives AFTER the first caller has detached.
       b = ensureControlMaster(target, { interactive })
-      await waitForCalls(log, calls => calls.filter(argv => argv.includes('-O')).length === 2)
+      await waitForCalls(log, calls => calls.filter(argv => argv.includes('-O')).length === 3)
     } finally {
       await writeFile(`${log}.release`, '')
       await Promise.all([a, b])
@@ -81,7 +82,7 @@ for (const interactive of [false, true]) test(`caller cancellation preserves sha
     assert.equal(rb.mode, 'started')
 
     const calls = JSON.parse(`[${(await readFile(log, 'utf8')).trim().split('\n').join(',')}]`)
-    const probes = calls.filter((argv) => !argv.includes('-O'))
+    const probes = calls.filter((argv) => !argv.includes('-O') && !argv.includes('-G'))
     assert.equal(probes.length, 1, 'exactly ONE shared headless warm-up ran')
   })
 })

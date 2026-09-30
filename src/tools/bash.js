@@ -15,7 +15,7 @@ export async function remoteJob(target, request, signal) {
   return JSON.parse(output.toString('utf8'))
 }
 
-export function makeBashTool(target, cwd, toRemote) {
+export function makeBashTool(target, cwd = target.root) {
   return defTextTool({
     name: 'bash',
     description: 'Execute bash on the selected remote host. Each call starts a fresh shell. Commands have the SSH account permissions. Background jobs return a job_id; use job_output/job_kill with the same target. Remote Linux requires bash and python3.',
@@ -32,7 +32,7 @@ export function makeBashTool(target, cwd, toRemote) {
     },
     async execute(args, exec) {
       const a = checkArgs('bash', args, { command: 'string', description: '?string', workdir: '?string', timeoutMs: '?integer', run_in_background: '?boolean' })
-      const dir = toRemote(resolveRemote(a.workdir ?? '.', cwd))
+      const dir = resolveRemote(a.workdir ?? '.', cwd)
       if (a.run_in_background) {
         const job_id = randomUUID()
         try {

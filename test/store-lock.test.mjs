@@ -21,7 +21,7 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { withStoreLock, readTargetStore, saveTargetStore, _lockTestHooks } from '../src/store.js'
+import { withStoreLock, readTargetStoreStrict as readTargetStore, saveTargetStore, _lockTestHooks } from '../src/store.js'
 
 const STORE_URL = new URL('../src/store.js', import.meta.url).href
 const OWNER = 'owner'
@@ -81,7 +81,7 @@ async function lockArtifacts(dir) {
  */
 function spawnWorker(file, id, count) {
   const worker = `
-import { withStoreLock, readTargetStore, saveTargetStore } from ${JSON.stringify(STORE_URL)}
+import { withStoreLock, readTargetStoreStrict as readTargetStore, saveTargetStore } from ${JSON.stringify(STORE_URL)}
 const [file, id, count] = process.argv.slice(2)
 for (let i = 0; i < Number(count); i++) {
   await withStoreLock(file, async () => {

@@ -6,7 +6,7 @@ import { ensureControlMaster, sshControl, sshExec, shq } from './ssh.js'
 export const manageSchema = z.strictObject({
   action: z.enum(['list', 'add', 'update', 'remove', 'connect', 'disconnect', 'status']),
   target: z.string().min(1).optional().describe('Existing target name for update/remove/connect/disconnect/status.'),
-  ...Object.fromEntries(Object.entries(targetFields).map(([key, schema]) => [key, schema.optional()])),
+  ...Object.fromEntries(Object.entries(targetFields).filter(([key]) => key !== 'port').map(([key, schema]) => [key, schema.optional()])),
   port: targetFields.port.nullable().describe('SSH port; null clears an override on update.'),
   create: z.boolean().optional().describe('Create the remote root if missing. Default false.'),
 })
@@ -50,7 +50,19 @@ export async function manageTargets(input, storeFile, signal) {
     if (args.action === 'disconnect' && result.code !== 0 && !/No such file|Connection refused/i.test(result.stderr)) throw new Error(result.stderr || 'Failed to disconnect.')
     return { target: target.name, connected: args.action === 'status' && result.code === 0, detail: (result.stderr || result.stdout).trim() }
   }
-  // ponytail: verification holds the existing store lock; split it out if concurrent edits become frequent.
+  let before, prepared
+  if (args.action !== 'remove') {
+    const snapshot = await readTargetStoreStrict(storeFile)
+    before = args.action === 'update' ? snapshot.find(t => t.name === args.target) : undefined
+    if (args.action === 'update' && !before) throw new Error(`No target named "${args.target}".`)
+    const fields = Object.fromEntries(Object.keys(targetFields).filter(key => args[key] !== undefined).map(key => [key, args[key]]))
+    const entry = { ...before, ...fields }
+    if (args.port === null || (args.ssh !== undefined && args.port === undefined)) delete entry.port
+    prepared = parseTargets([entry])[0]
+    parseTargets([...snapshot.filter(t => args.action === 'add' || t.name !== args.target), prepared])
+    // Network and user interaction must not hold the shared configuration lock.
+    await verifyTarget(prepared, args.create === true, signal)
+  }
   return withStoreLock(storeFile, async () => {
     signal?.throwIfAborted()
     const targets = await readTargetStoreStrict(storeFile)
@@ -59,16 +71,12 @@ export async function manageTargets(input, storeFile, signal) {
     if (args.action === 'remove') {
       targets.splice(index, 1)
     } else {
-      const before = args.action === 'update' ? targets[index] : {}
-      const fields = Object.fromEntries(Object.keys(targetFields).filter(key => args[key] !== undefined).map(key => [key, args[key]]))
-      const entry = { ...before, ...fields }
-      if (args.port === null || (args.ssh !== undefined && args.port === undefined)) delete entry.port
-      const [target] = parseTargets([entry])
-      const others = targets.filter((_, i) => args.action === 'add' || i !== index)
-      parseTargets([...others, target]) // Name collisions must fail before SSH or persistence.
-      await verifyTarget(target, args.create === true, signal)
-      if (args.action === 'add') targets.push(target)
-      else targets[index] = target
+      if (before && Object.keys(targetFields).some(key => targets[index][key] !== before[key])) {
+        throw new Error(`Target "${args.target}" changed during verification; re-read its settings and retry.`)
+      }
+      if (args.action === 'add') targets.push(prepared)
+      else targets[index] = prepared
+      parseTargets(targets) // Recheck concurrent adds/renames before saving.
     }
     signal?.throwIfAborted()
     await saveTargetStore(storeFile, targets)

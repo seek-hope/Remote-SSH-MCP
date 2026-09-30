@@ -33,7 +33,7 @@ function atomicWriteScript({ path, tmp, guard }) {
   ]
   if (guard !== undefined) {
     lines.push(
-      `  if [ "$(stat -c '%Y %s' -- ${shq(path)} 2>/dev/null)" = ${shq(guard)} ]; then`,
+      `  if [ "$(stat -c '%y %s' -- ${shq(path)} 2>/dev/null)" = ${shq(guard)} ]; then`,
       `    chmod --reference=${shq(path)} ${shq(tmp)} 2>/dev/null || true`,
       `    if mv -f ${shq(tmp)} ${shq(path)}; then exit 0; else rm -f ${shq(tmp)}; exit 1; fi`,
       `  else`,
@@ -83,21 +83,21 @@ function renderNumbered(path, text, offset, totalLines) {
   const numbered = lines.map((l, i) => `${offset + i}\t${l}`).join('\n')
   const end = offset + lines.length - 1
   const footer = lines.length === 0
-    ? '(File is empty)'
+    ? (totalLines > 0 ? `(Offset ${offset} is past end of file - total ${totalLines} lines)` : '(File is empty)')
     : end >= totalLines
       ? `(End of file - total ${totalLines} lines)`
       : `(Showing lines ${offset}-${end} of ${totalLines}. Use offset to continue.)`
   return `<path>${path}</path>\n<content>\n${numbered}\n</content>\n${footer}`
 }
 
-export function makeReadTool(target, cwd, toRemote) {
+export function makeReadTool(target, cwd = target.root) {
   return defTextTool({
     name: 'read',
-    description: `Read a UTF-8 text file and return line-numbered content. REMOTE: paths live on ${target.name} (ssh ${target.ssh}); reads run on the remote host.`,
+    description: 'Read a UTF-8 text file and return line-numbered content. The remote host must run Linux. REMOTE: the path lives on the selected host, and the read runs there.',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: `Path to read, on the remote host ${target.name}. A relative path resolves against the target root.` },
+        file_path: { type: 'string', description: 'Path to read on the selected remote host. A relative path resolves against the target root.' },
         offset: { type: 'number', description: '1-based first line to return. Defaults to 1.' },
         limit: { type: 'number', description: 'Maximum number of lines to return. Defaults to 2000.' },
       },
@@ -109,7 +109,7 @@ export function makeReadTool(target, cwd, toRemote) {
       const limit = a.limit ?? 2000
       if (offset < 1) throw new Error('read: offset must be >= 1')
       if (limit < 1) throw new Error('read: limit must be >= 1')
-      const path = toRemote(resolveRemote(a.file_path, cwd))
+      const path = resolveRemote(a.file_path, cwd)
       const end = offset + limit - 1
       // One round trip: the requested window first, then a per-call random
       // separator and the total line count LAST — when the window exceeds
@@ -126,6 +126,7 @@ export function makeReadTool(target, cwd, toRemote) {
         `else sed -n '${offset},${end}p' ${shq(path)}; echo; echo ${shq(sep)}; n=$(wc -l < ${shq(path)}); [ -n "$(tail -c 1 ${shq(path)})" ] && n=$((n + 1)); echo "$n"; fi`,
       ].join('\n')
       const r = await sshRun({ target: target.ssh, port: target.port, command: script, signal: exec.signal, controlPersist: target.controlPersist })
+      if (r.timedOut) throw new Error(`read: timed out reading ${path} on ${target.name}`)
       const raw = r.stdout
       if (raw.startsWith('__REMOTE_SSH_ERR__:is-a-directory')) throw new Error(`read: ${path} is a directory`)
       if (raw.startsWith('__REMOTE_SSH_ERR__:not-found')) throw new Error(`read: file not found: ${path}`)
@@ -150,14 +151,14 @@ export function makeReadTool(target, cwd, toRemote) {
   })
 }
 
-export function makeWriteTool(target, cwd, toRemote) {
+export function makeWriteTool(target, cwd = target.root) {
   return defTextTool({
     name: 'write',
-    description: `Create or fully replace a UTF-8 text file. REMOTE: paths live on ${target.name} (ssh ${target.ssh}); the file is written on the remote host (parent directories are created).`,
+    description: 'Create or fully replace a UTF-8 text file. The remote host must run Linux. REMOTE: the file is written on the selected host (parent directories are created).',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: `Path to write, on the remote host ${target.name}. A relative path resolves against the target root.` },
+        file_path: { type: 'string', description: 'Path to write on the selected remote host. A relative path resolves against the target root.' },
         content: { type: 'string', description: 'Full UTF-8 text content to write.' },
       },
       required: ['file_path', 'content'],
@@ -165,7 +166,7 @@ export function makeWriteTool(target, cwd, toRemote) {
     async execute(args, exec) {
       const a = checkArgs('write', args, { file_path: 'string', content: 'string' })
       if (hasBinaryContent(a.content)) throw new Error('write: content must be UTF-8 text (NUL bytes or truncated characters are not allowed)')
-      const path = toRemote(resolveRemote(a.file_path, cwd))
+      const path = resolveRemote(a.file_path, cwd)
       const buf = Buffer.from(a.content, 'utf8')
       // base64 over stdin: binary-safe, no argv size limits. The write is
       // ATOMIC: decode into a temp file in the same directory, then mv -f
@@ -182,14 +183,14 @@ export function makeWriteTool(target, cwd, toRemote) {
   })
 }
 
-export function makeEditTool(target, cwd, toRemote) {
+export function makeEditTool(target, cwd = target.root) {
   return defTextTool({
     name: 'edit',
-    description: `Edit an existing UTF-8 text file by replacing literal text. REMOTE: paths live on ${target.name} (ssh ${target.ssh}); the edit is applied on the remote host. Read the file first (the read-before-edit policy still applies by convention).`,
+    description: 'Edit an existing UTF-8 text file by replacing literal text. The remote host must run Linux. REMOTE: the edit is applied on the selected host. Read the file first (the read-before-edit policy still applies by convention).',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: `Path to edit, on the remote host ${target.name}. A relative path resolves against the target root.` },
+        file_path: { type: 'string', description: 'Path to edit on the selected remote host. A relative path resolves against the target root.' },
         old_string: { type: 'string', description: 'Literal text to replace. Must match exactly.' },
         new_string: { type: 'string', description: 'Literal replacement text. Use an empty string to delete the match.' },
         replace_all: { type: 'boolean', description: 'Replace all matches. Defaults to false; when false, old_string must appear exactly once.' },
@@ -203,20 +204,20 @@ export function makeEditTool(target, cwd, toRemote) {
       if (a.old_string.length === 0) throw new Error('edit: old_string must be a non-empty string')
       if (hasBinaryContent(a.old_string)) throw new Error('edit: old_string must be UTF-8 text (NUL bytes or truncated characters are not allowed)')
       if (hasBinaryContent(a.new_string)) throw new Error('edit: new_string must be UTF-8 text (NUL bytes or truncated characters are not allowed)')
-      const path = toRemote(resolveRemote(a.file_path, cwd))
+      const path = resolveRemote(a.file_path, cwd)
       // The stat line (mtime + size) rides ahead of the base64 payload so the
       // write-back can refuse a file that changed under the read-modify-write
       // (TOCTOU guard).
       const raw = await sshExec({
         target: target.ssh, port: target.port,
         controlPersist: target.controlPersist,
-        command: `test -f ${shq(path)} && { stat -c '%Y %s' -- ${shq(path)}; head -c ${MAX_EDIT_FILE_BYTES + 1} ${shq(path)} | base64; }`,
+        command: `test -f ${shq(path)} && { stat -c '%y %s' -- ${shq(path)}; head -c ${MAX_EDIT_FILE_BYTES + 1} ${shq(path)} | base64; }`,
         signal: exec.signal,
       }).catch((e) => { throw new Error(`edit: cannot read ${path}: ${e.message}`) })
       const text = raw.toString('utf8')
       const nl = text.indexOf('\n')
       const stamp = nl === -1 ? '' : text.slice(0, nl).trim()
-      if (!/^\d+ \d+$/.test(stamp)) {
+      if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ [+-]\d{4} \d+$/.test(stamp)) {
         throw new Error(`edit: unexpected remote output while stating ${path}: ${text.slice(0, 120)}`)
       }
       const bytes = Buffer.from(text.slice(nl + 1).replace(/\s/g, ''), 'base64')

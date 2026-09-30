@@ -8,12 +8,16 @@
  * calls still use BatchMode.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
 import { chmod, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { promisify } from 'node:util'
 import { effectiveControlPersist } from './target.js'
+import { withStoreLock } from './store.js'
+
+const execFileAsync = promisify(execFile)
 
 /** ControlMaster socket directory (0700 — OpenSSH rejects a shared dir). */
 const controlDir = () => resolve(process.env.REMOTE_SSH_CONTROL_DIR || join(homedir(), '.cache', 'remote-ssh', 'control'))
@@ -68,7 +72,7 @@ async function sshSpawn(opts, command) {
     throw new Error(`sshSpawn: target must be a non-empty ssh destination string (received ${typeof target})`)
   }
   const ctl = controlArgs({ controlPersist })
-  if (effectiveControlPersist(opts) > 0) await ensureControlDir()
+  if (effectiveControlPersist({ controlPersist }) > 0) await ensureControlDir()
   const portOptionArgs = portArgs({ port })
   // A single ASCII argument also survives csh/tcsh newline/history quoting.
   // Decode inside POSIX sh without consuming the command's stdin payload.
@@ -117,6 +121,72 @@ export function keepTail(chunks, byteCount, chunk, cap) {
 }
 
 /**
+ * Spawn one ssh child and collect its streams with tail-keeping; the transport
+ * mechanics shared by sshExec and sshRun. A race between abort, timeout, spawn
+ * error and close settles exactly once.
+ *
+ * - `onTimeout` (optional): return the Error to reject with. When omitted, a
+ *   timeout only kills the child and lets `close` resolve (sshRun reads
+ *   `timedOut` itself).
+ * - `onClose` receives the collected streams and a `settle` handle
+ *   (`resolve`/`reject`) so each caller maps the transport result its own way.
+ */
+function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, onTimeout, onClose }) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('aborted'))
+    const child = spawn(spec.command, spec.args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const outChunks = []
+    const errChunks = []
+    let outBytes = 0
+    let errBytes = 0
+    let outTotal = 0
+    let timedOut = false
+    let settled = false
+    const kill = () => { try { child.kill('SIGKILL') } catch {} }
+    const finish = (fn, val) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      fn(val)
+    }
+    const onAbort = () => { kill(); finish(reject, new Error('aborted')) }
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true
+          kill()
+          if (onTimeout) finish(reject, onTimeout())
+        }, timeoutMs)
+      : undefined
+    const cleanup = () => {
+      if (timer) clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
+    // keepTail bounds memory on both streams and keeps the TAIL, so the error
+    // message (last stderr lines) and any truncation/exit marker stay accurate.
+    child.stdout.on('data', (d) => {
+      outTotal += d.length
+      outBytes = keepTail(outChunks, outBytes, d, maxStdout)
+    })
+    child.stderr.on('data', (d) => { errBytes = keepTail(errChunks, errBytes, d, maxStderr) })
+    child.on('error', (e) => finish(reject, new Error(`ssh spawn failed: ${e.message}`)))
+    child.on('close', (transportCode) => {
+      onClose({
+        transportCode, timedOut, outChunks, errChunks, outTotal, outBytes, errBytes,
+        settle: { resolve: (v) => finish(resolve, v), reject: (e) => finish(reject, e) },
+      })
+    })
+    if (stdin !== undefined) {
+      child.stdin.on('error', () => {}) // remote closed early; close event reports it
+      child.stdin.end(stdin)
+    } else {
+      child.stdin.end()
+    }
+  })
+}
+
+/**
  * Run a remote command via ssh. Resolves with stdout (Buffer).
  * Rejects on non-zero exit (message carries stderr tail), spawn failure,
  * abort, or local timeout (the local ssh client is killed; the remote
@@ -144,77 +214,22 @@ export async function sshExec(opts) {
     maxStderr = 64 * 1024,
   } = opts
   const spec = await sshSpawn(opts, command)
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(new Error('aborted'))
-    const child = spawn(
-      spec.command,
-      spec.args,
-      { stdio: ['pipe', 'pipe', 'pipe'] },
-    )
-    const outChunks = []
-    const errChunks = []
-    let outBytes = 0
-    let errBytes = 0
-    let outTotal = 0
-    let settled = false
-
-    const fail = (err) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      try { child.kill('SIGKILL') } catch {}
-      reject(err)
-    }
-    const timer = timeoutMs > 0
-      ? setTimeout(() => fail(new Error(`ssh timeout after ${timeoutMs}ms: ${command.slice(0, 120)}`)), timeoutMs)
-      : undefined
-    const onAbort = () => fail(new Error('aborted'))
-    const cleanup = () => {
-      if (timer) clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-
-    // keepTail bounds memory on both streams and keeps the TAIL, so the error
-    // message (last stderr lines) and any truncation marker stay accurate.
-    child.stdout.on('data', (d) => {
-      outTotal += d.length
-      outBytes = keepTail(outChunks, outBytes, d, maxStdout)
-    })
-    child.stderr.on('data', (d) => { errBytes = keepTail(errChunks, errBytes, d, maxStderr) })
-    child.on('error', (e) => fail(new Error(`ssh spawn failed: ${e.message}`)))
-    child.on('close', (code) => {
-      if (settled) return
-      settled = true
-      cleanup()
+  return runSshChild(spec, {
+    stdin, signal, timeoutMs, maxStdout, maxStderr,
+    onTimeout: () => new Error(`ssh timeout after ${timeoutMs}ms: ${command.slice(0, 120)}`),
+    onClose: ({ transportCode, outChunks, errChunks, outTotal, settle }) => {
       const stderr = Buffer.concat(errChunks).toString('utf8')
-      if (code !== 0) {
+      if (transportCode !== 0) {
         const tail = stderr.trim().split('\n').slice(-5).join('\n')
-        reject(new Error(`remote command failed (exit ${code}): ${tail || '(no stderr)'}`))
-        return
+        return settle.reject(new Error(`remote command failed (exit ${transportCode}): ${tail || '(no stderr)'}`))
       }
       const out = Buffer.concat(outChunks)
       if (outTotal > maxStdout) {
-        resolve(Buffer.concat([Buffer.from(`[output truncated to last ${maxStdout} bytes]\n`), out]))
-        return
+        return settle.resolve(Buffer.concat([Buffer.from(`[output truncated to last ${maxStdout} bytes]\n`), out]))
       }
-      resolve(out)
-    })
-    if (stdin !== undefined) {
-      child.stdin.on('error', () => {}) // remote closed early; close event reports it
-      child.stdin.end(stdin)
-    } else {
-      child.stdin.end()
-    }
+      settle.resolve(out)
+    },
   })
-}
-
-/**
- * Run a remote command and decode stdout as UTF-8 text.
- * @returns {Promise<string>}
- */
-export async function sshText(opts) {
-  return (await sshExec(opts)).toString('utf8')
 }
 
 /**
@@ -238,64 +253,27 @@ export async function sshRun(opts) {
   // command output can never spoof the transport's exit-code line.
   const wrapped = `( ${command}\n); __rc=$?; echo "${MARK}\${__rc}"`
   const spec = await sshSpawn(opts, wrapped)
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(new Error('aborted'))
-    const child = spawn(
-      spec.command,
-      spec.args,
-      { stdio: ['pipe', 'pipe', 'pipe'] },
-    )
-    const outChunks = []
-    const errChunks = []
-    let outBytes = 0
-    let errBytes = 0
-    let settled = false
-    let timedOut = false
-    const done = (fn, val) => {
-      if (settled) return
-      settled = true
-      cleanup()
-      fn(val)
-    }
-    const kill = () => { try { child.kill('SIGKILL') } catch {} }
-    const timer = timeoutMs > 0
-      ? setTimeout(() => { timedOut = true; kill() }, timeoutMs)
-      : undefined
-    const onAbort = () => { kill(); done(reject, new Error('aborted')) }
-    const cleanup = () => {
-      if (timer) clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-    // Keep the TAIL of both streams within their byte caps: the exit marker is
-    // the last stdout line, so tail-keeping guarantees a reliable exit code
-    // even when stdout exceeds maxStdout (and keeps bash's tail semantics).
-    child.stdout.on('data', (d) => { outBytes = keepTail(outChunks, outBytes, d, maxStdout) })
-    child.stderr.on('data', (d) => { errBytes = keepTail(errChunks, errBytes, d, maxStderr) })
-    child.on('error', (e) => done(reject, new Error(`ssh spawn failed: ${e.message}`)))
-    child.on('close', (transportCode) => {
+  // No onTimeout: a local timeout only kills the child and lets `close`
+  // resolve with timedOut:true (sshRun reports timeouts as data).
+  return runSshChild(spec, {
+    stdin, signal, timeoutMs, maxStdout, maxStderr,
+    onClose: ({ transportCode, timedOut, outChunks, errChunks, settle }) => {
       let stdout = Buffer.concat(outChunks).toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
       if (timedOut) {
-        return done(resolve, { code: null, stdout, stderr, timedOut: true })
+        return settle.resolve({ code: null, stdout, stderr, timedOut: true })
       }
       if (transportCode !== 0) {
-        return done(reject, new Error(`ssh transport failed (exit ${transportCode}): ${stderr.trim().split('\n').slice(-3).join('\n')}`))
+        return settle.reject(new Error(`ssh transport failed (exit ${transportCode}): ${stderr.trim().split('\n').slice(-3).join('\n')}`))
       }
       const idx = stdout.lastIndexOf(MARK)
       if (idx === -1) {
-        return done(reject, new Error(`remote run ended without exit marker: ${stdout.slice(-200)}`))
+        return settle.reject(new Error(`remote run ended without exit marker: ${stdout.slice(-200)}`))
       }
       const code = parseInt(stdout.slice(idx + MARK.length).trim(), 10)
       stdout = stdout.slice(0, idx).replace(/\n$/, '')
-      done(resolve, { code: Number.isFinite(code) ? code : null, stdout, stderr })
-    })
-    if (stdin !== undefined) {
-      child.stdin.on('error', () => {})
-      child.stdin.end(stdin)
-    } else {
-      child.stdin.end()
-    }
+      settle.resolve({ code: Number.isFinite(code) ? code : null, stdout, stderr })
+    },
   })
 }
 
@@ -339,7 +317,21 @@ export async function sshControl(target, op, timeoutMs = 15_000) {
 
 /** Stable key for one ssh destination's master; all roots on a host share it. */
 function masterKey(target) {
-  return `${target.ssh}\u0000${target.port ?? ''}`
+  return `${controlDir()}\u0000${target.ssh}\u0000${target.port ?? ''}`
+}
+
+async function warmControlMaster(target, options) {
+  // Let OpenSSH resolve aliases, users, ports and ProxyJump exactly as it does
+  // for a real command. All MCP processes sharing this socket share its lock.
+  const spec = await sshSpawn({ target: target.ssh, port: target.port, controlPersist: target.controlPersist }, 'true')
+  const { stdout } = await execFileAsync(spec.command, ['-G', ...spec.args], { timeout: 10_000, maxBuffer: 512 * 1024 })
+  const socket = stdout.match(/^controlpath (.+)$/m)?.[1].trim()
+  if (!socket || socket === 'none') throw new Error('OpenSSH did not resolve a reusable ControlPath')
+  return withStoreLock(socket, async () => {
+    const existing = await sshControl(target, 'check', 10_000)
+    if (existing.code === 0) return { ok: true, mode: 'reused', detail: (existing.stderr || existing.stdout).trim() }
+    return establishControlMaster(target, options)
+  }, { timeoutMs: 200_000 }) // Covers the headless probe plus terminal authentication.
 }
 
 /**
@@ -358,8 +350,8 @@ function masterKey(target) {
  * caller that may open a terminal finds a headless-only warm-up in flight,
  * it waits for it and starts an interactive warm-up of its own if the
  * headless one failed ("any caller needing interactivity gets interactivity").
- * A recent interactive failure is replayed for 30s instead of opening another
- * terminal; a later `ssh -O check` success always wins and clears that failure.
+ * A recent failed terminal attempt is replayed for 30s instead of opening
+ * another terminal; a later `ssh -O check` success always wins and clears it.
  *
  * @param {object} target remote target
  * @param {object} [options]
@@ -373,8 +365,7 @@ export async function ensureControlMaster(target, options = {}) {
   const signal = options.signal
   if (signal?.aborted) return { ok: false, mode: 'aborted', error: 'aborted' }
 
-  const persist = effectiveControlPersist(target)
-  if (persist <= 0) return { ok: true, mode: 'disabled', detail: 'ControlPersist is disabled' }
+  if (effectiveControlPersist(target) <= 0) return { ok: true, mode: 'disabled', detail: 'ControlPersist is disabled' }
 
   // A master from any source (previous session, manual connect) is the answer.
   let existing
@@ -407,15 +398,19 @@ export async function ensureControlMaster(target, options = {}) {
     // establishControlMaster deliberately receives NO caller signal: the
     // shared warm-up must not be killed by one caller's abort.
     const warm = { interactive, promise: undefined }
-    warm.promise = establishControlMaster(target, { interactive })
+    warm.promise = warmControlMaster(target, { interactive })
       .catch((error) => ({
         ok: false,
         mode: 'unexpected',
         error: String(error?.message ?? error),
       }))
       .then((result) => {
-        // Cache the shared outcome, never an individual caller's cancellation.
-        if (!result.ok && interactive) recentWarmFailures.set(key, { at: Date.now(), result })
+        // Only a failed TERMINAL attempt is worth replaying: it avoids a burst
+        // of windows for the same bad credentials. A headless/transient failure
+        // never opened a window, so it must not suppress a timely retry.
+        if (!result.ok && interactive && (result.mode === 'timeout' || result.mode === 'terminal-unavailable')) {
+          recentWarmFailures.set(key, { at: Date.now(), result })
+        }
         return result
       })
       .finally(() => {

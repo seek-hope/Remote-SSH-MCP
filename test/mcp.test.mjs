@@ -11,7 +11,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
 import { createServer } from '../src/server.js'
 import { parseTargets } from '../src/target.js'
 import { readTargetStoreStrict } from '../src/store.js'
-import { ensureControlMaster } from '../src/ssh.js'
+import { ensureControlMaster, shq } from '../src/ssh.js'
 import { remoteCommand } from './helpers.mjs'
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url))
@@ -20,6 +20,7 @@ const fs = require('node:fs')
 const { spawnSync } = require('node:child_process')
 const argv = process.argv.slice(2)
 fs.appendFileSync(process.env.REMOTE_TEST_LOG, JSON.stringify({ argv, pid: process.pid }) + '\\n')
+if (argv.includes('-G')) { console.log('controlpath ' + process.env.REMOTE_SSH_CONTROL_DIR + '/fake'); process.exit(0) }
 if (argv.includes('-O')) {
   if (argv.includes('exit')) fs.rmSync(process.env.REMOTE_TEST_MASTER, { force: true })
   process.exit(fs.existsSync(process.env.REMOTE_TEST_MASTER) || argv.includes('exit') ? 0 : 255)
@@ -206,6 +207,58 @@ test('MCP cancellation reaches the SSH subprocess', async () => fixture(async ({
   } finally {
     controller.abort()
     await running
+  }
+}))
+
+test('independent stdio clients run concurrent calls on shared and different hosts with isolated cancellation', async () => fixture(async ({ dir, file, env, json, log }) => {
+  await writeFile(env.REMOTE_TEST_MASTER, '')
+  for (const [name, ssh] of [['alpha', 'shared-host'], ['alpha-other-root', 'shared-host'], ['beta', 'other-host']]) {
+    await json('remote_ssh_targets', { action: 'add', name, ssh, root: join(dir, name), create: true })
+  }
+  const clients = [0, 1].map(i => new Client({ name: `agent-${i}`, version: '1' }, { versionNegotiation: { mode: 'auto' } }))
+  const release = join(dir, 'release')
+  const targets = ['alpha', 'beta', 'alpha-other-root', 'alpha', 'beta', 'alpha-other-root']
+  const controller = new AbortController()
+  const pending = []
+  try {
+    await Promise.all(clients.map(client => client.connect(new StdioClientTransport({
+      command: process.execPath, args: [CLI, '--targets', file], env, stderr: 'pipe',
+    }))))
+    for (const [i, target] of targets.entries()) {
+      const command = `touch ${shq(join(dir, `started-${i}`))}; while [ ! -f ${shq(release)} ]; do sleep 0.02; done; printf 'call-${i}:'; pwd`
+      pending.push(clients[i % 2].callTool({ name: 'bash', arguments: { target, command } }, i === 0 ? { signal: controller.signal } : undefined).catch(error => error))
+    }
+    let started
+    for (let i = 0; i < 300; i++) {
+      started = await Promise.all(targets.map((_, i) => stat(join(dir, `started-${i}`)).then(() => true, () => false)))
+      if (started.every(Boolean)) break
+      await delay(10)
+    }
+    assert.ok(started.every(Boolean), 'All six commands entered before any was released')
+    const calls = (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse)
+    const pid = calls.find(row => remoteCommand(row.argv).includes('started-0'))?.pid
+    assert.ok(pid)
+    controller.abort()
+    assert.ok(await pending[0] instanceof Error)
+    let exited = false
+    for (let i = 0; i < 100 && !exited; i++) {
+      try { process.kill(pid, 0) } catch (error) { if (error.code === 'ESRCH') exited = true; else throw error }
+      if (!exited) await delay(10)
+    }
+    assert.ok(exited, 'Cancellation reached only the selected SSH subprocess')
+    await writeFile(release, '')
+    for (const [i, result] of (await Promise.all(pending)).entries()) {
+      if (i === 0) continue
+      assert.notEqual(result.isError, true)
+      assert.equal(result.content[0].text.trim(), `call-${i}:${join(dir, targets[i])}\n[exit code: 0]`)
+    }
+    const after = await clients[0].callTool({ name: 'bash', arguments: { target: 'alpha', command: 'printf still-connected' } })
+    assert.equal(after.content[0].text, 'still-connected\n[exit code: 0]')
+  } finally {
+    controller.abort()
+    await writeFile(release, '')
+    await Promise.all(pending)
+    await Promise.all(clients.map(client => client.close()))
   }
 }))
 
