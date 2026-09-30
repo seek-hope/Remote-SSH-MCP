@@ -170,30 +170,48 @@ async function gateLive(gatePath) {
  * recorded pid is LIVE is never stolen — whatever its age (a wedged
  * recoverer surfaces as the acquirer's bounded-wait timeout instead); a DEAD
  * recoverer's gate is taken over immediately; an ownerless one only after
- * GATE_STALE_MS. Takeover renames the old gate to a unique trash name
- * (atomic: no half-removed gate is ever visible) before recreating ours.
+ * GATE_STALE_MS. Like the lock itself, the gate is built in a private staging
+ * directory and published with an atomic rename, so the canonical gate path
+ * never exists as an ownerless husk; a takeover renames the stale gate to a
+ * unique trash name (atomic: no half-removed gate is ever visible) before
+ * publishing ours.
  * @returns {Promise<boolean>} true when WE now hold the gate
  */
-async function enterGate(gatePath) {
+async function enterGate(gatePath, token) {
+  const staging = `${gatePath}.staging.${token}`
   try {
-    await mkdir(gatePath)
-    return true
-  } catch (e) {
-    if (e?.code !== 'EEXIST') return false // e.g. EACCES: leave recovery to others
-  }
-  if (await gateLive(gatePath)) return false // another live recoverer owns the gate
-  const trash = `${gatePath}.${process.pid}.${randomUUID()}.trash`
-  try {
-    await rename(gatePath, trash)
+    await mkdir(staging)
+    await writeOwnerRecord(staging, token)
   } catch {
-    return false // another breaker moved/won it; let it proceed
+    await rm(staging, { recursive: true, force: true }).catch(() => {})
+    return false // e.g. EACCES: leave recovery to others
   }
-  await rm(trash, { recursive: true, force: true }).catch(() => {})
   try {
-    await mkdir(gatePath)
-    return true
-  } catch {
-    return false // another breaker won the gate; let it proceed
+    if (await gateLive(gatePath)) return false // another live recoverer owns the gate
+    try {
+      await rename(staging, gatePath)
+      return true
+    } catch (e) {
+      if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'].includes(e?.code)) return false
+    }
+    // The target is non-empty (or a Windows empty-dir refusal): take it over
+    // only when it is not live, by moving it aside first.
+    if (await gateLive(gatePath)) return false
+    const trash = `${gatePath}.${process.pid}.${randomUUID()}.trash`
+    try {
+      await rename(gatePath, trash)
+    } catch {
+      return false // another breaker moved/won it; let it proceed
+    }
+    await rm(trash, { recursive: true, force: true }).catch(() => {})
+    try {
+      await rename(staging, gatePath)
+      return true
+    } catch {
+      return false // another breaker won the gate; let it proceed
+    }
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -221,9 +239,8 @@ async function releaseGate(gatePath, token) {
  * is swept away together with the gate by the next takeover.
  */
 async function recoverLock(lockPath, gatePath, token, graceMs) {
-  if (!(await enterGate(gatePath))) return
+  if (!(await enterGate(gatePath, token))) return
   try {
-    await writeOwnerRecord(gatePath, token).catch(() => {}) // best effort: enables gate takeover
     await _lockTestHooks.onGateEntered?.(lockPath) // test-only race-injection seam
     if (await judgeLock(lockPath, graceMs) === 'stale') {
       const trash = join(gatePath, `victim.${process.pid}.${randomUUID()}`)

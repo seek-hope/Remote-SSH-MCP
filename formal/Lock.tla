@@ -10,9 +10,8 @@
 \* directory. Recovery still runs under the `<store>.lock.recover` gate, and a
 \* directory whose owner pid is alive is never recovered.
 \*
-\* Deliberate abstraction (see formal/README.md): gate acquisition is atomic
-\* here. The gate is a recovery-only mutex; its husk window is the same class
-\* of issue and is tracked separately.
+\* The gate is acquired with the same staging+rename publish as the lock, so
+\* the model includes its move-aside and publish steps explicitly.
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -159,23 +158,34 @@ WaitStep(p) ==
   /\ UNCHANGED <<alive, lockPresent, lockHusk, lockOwner, lockAged,
                  gatePresent, gateHusk, gateOwner, gateAged>>
 
-RecoverCreate(p) ==
+\* Publish the gate into an absent canonical path (atomic rename).
+GatePublish(p) ==
   /\ pc[p] = "recover" /\ alive[p] /\ ~gatePresent
   /\ gatePresent' = TRUE /\ gateHusk' = FALSE /\ gateOwner' = p /\ gateAged' = FALSE
   /\ pc' = [pc EXCEPT ![p] = "inGate"]
   /\ UNCHANGED <<alive, lockPresent, lockHusk, lockOwner, lockAged>>
 
-RecoverTake(p) ==
-  /\ pc[p] = "recover" /\ alive[p] /\ gatePresent /\ ~GateLive
-  /\ gateHusk' = FALSE /\ gateOwner' = p /\ gateAged' = FALSE
+\* Replace an aged ownerless gate husk (legacy artifact) with our gate.
+GateReplaceHusk(p) ==
+  /\ pc[p] = "recover" /\ alive[p]
+  /\ gatePresent /\ gateHusk /\ gateAged
+  /\ gatePresent' = TRUE /\ gateHusk' = FALSE /\ gateOwner' = p /\ gateAged' = FALSE
   /\ pc' = [pc EXCEPT ![p] = "inGate"]
-  /\ UNCHANGED <<alive, lockPresent, lockHusk, lockOwner, lockAged, gatePresent>>
+  /\ UNCHANGED <<alive, lockPresent, lockHusk, lockOwner, lockAged>>
 
-RecoverWait(p) ==
+\* A live gate (including a young ownerless husk) blocks us: back off.
+GateBackoff(p) ==
   /\ pc[p] = "recover" /\ alive[p] /\ GateLive
   /\ pc' = [pc EXCEPT ![p] = "wait"]
   /\ UNCHANGED <<alive, lockPresent, lockHusk, lockOwner, lockAged,
                  gatePresent, gateHusk, gateOwner, gateAged>>
+
+\* Move a dead non-empty gate aside so the next publish can succeed.
+GateMoveAside(p) ==
+  /\ pc[p] = "recover" /\ alive[p]
+  /\ gatePresent /\ ~gateHusk /\ ~GateLive
+  /\ gatePresent' = FALSE /\ gateHusk' = FALSE /\ gateOwner' = NoOne /\ gateAged' = FALSE
+  /\ UNCHANGED <<pc, alive, lockPresent, lockHusk, lockOwner, lockAged>>
 
 InGate(p) ==
   /\ pc[p] = "inGate" /\ alive[p] /\ gateOwner = p
@@ -196,7 +206,8 @@ Next ==
        \/ Confirm(p) \/ ConfirmMismatch(p) \/ ConfirmWait(p)
        \/ ReleaseStart(p) \/ Release(p)
        \/ JudgeStep(p) \/ WaitStep(p)
-       \/ RecoverCreate(p) \/ RecoverTake(p) \/ RecoverWait(p) \/ InGate(p)
+       \/ GatePublish(p) \/ GateReplaceHusk(p) \/ GateBackoff(p) \/ GateMoveAside(p)
+       \/ InGate(p)
 
 Spec == Init /\ [][Next]_vars
 
