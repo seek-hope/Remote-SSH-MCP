@@ -77,7 +77,7 @@ async function fixture(run) {
 
 test('MCP schemas, explicit target routing, CRUD and file operations', async () => fixture(async ({ dir, file, client, call, json, log }) => {
   const { tools } = await client.listTools()
-  assert.deepEqual(tools.map(t => t.name).sort(), ['bash', 'edit', 'glob', 'grep', 'job_kill', 'job_output', 'read', 'remote_ssh_targets', 'write'])
+  assert.deepEqual(tools.map(t => t.name).sort(), ['bash', 'edit', 'glob', 'grep', 'job_kill', 'job_output', 'read', 'remote_ssh_targets', 'sudo', 'write'])
   for (const tool of tools.filter(t => t.name !== 'remote_ssh_targets')) assert.ok(tool.inputSchema.required.includes('target'))
   assert.ok(!JSON.stringify(tools.map(t => t.inputSchema)).includes('password'))
   assert.equal((await call('read', { file_path: 'x' })).isError, true)
@@ -283,7 +283,7 @@ test('stdio supports legacy MCP initialization and keeps stdout protocol-only', 
     send({ jsonrpc: '2.0', method: 'notifications/initialized' })
     send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     for (let i = 0; i < 100 && !responses.some(r => r.id === 2); i++) await delay(10)
-    assert.equal(responses.find(r => r.id === 2)?.result.tools.length, 9)
+    assert.equal(responses.find(r => r.id === 2)?.result.tools.length, 10)
   } finally {
     child.stdin.end()
     const deadline = setTimeout(() => child.kill('SIGKILL'), 2000)

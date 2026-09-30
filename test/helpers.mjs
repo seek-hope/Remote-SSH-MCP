@@ -22,6 +22,14 @@ if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.s
 const outer = argv.at(-1) || ''
 const encoded = outer.match(/printf %s ([A-Za-z0-9+/=]+) \\| base64 -d/)
 const wrapped = encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : outer
+// Optional: prove the password was piped to sudo's stdin without logging it.
+// Only the sudo invocation reads stdin, so other calls never block on it.
+const expect = process.env.FAKE_SSH_EXPECT_STDIN
+if (expect !== undefined && wrapped.includes('sudo -S')) {
+  let data = ''
+  try { data = fs.readFileSync(0, 'utf8') } catch {}
+  if (data.trim() !== expect) { fs.writeSync(2, 'fake ssh: unexpected stdin'); process.exit(7) }
+}
 // Selective failure: invocations whose argv contains FAKE_SSH_FAIL_MATCH exit
 // with FAKE_SSH_FAIL_EXIT and optional FAKE_SSH_FAIL_STDERR (others proceed).
 const failMatch = process.env.FAKE_SSH_FAIL_MATCH
@@ -84,6 +92,29 @@ export async function installFakeSsh() {
     async cleanup() {
       delete process.env.FAKE_SSH_LOG
       process.env.PATH = previousPath
+      await rm(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+/**
+ * installFakeTerminal — replaces REMOTE_SSH_TERMINAL with a launcher that runs
+ * the generated terminal command and feeds `password` on its stdin, so the
+ * sudo flow can run without a desktop session. The password is only ever held
+ * by the fake terminal, never by the caller.
+ */
+export async function installFakeTerminal({ password = 'fakepw' } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-fake-terminal-'))
+  const bin = join(dir, 'terminal.sh')
+  await writeFile(bin, `#!/usr/bin/env bash\ncmd="\${@: -1}"\nprintf '%s\\n' ${JSON.stringify(password)} | bash -c "$cmd"\n`)
+  await chmod(bin, 0o755)
+  const previous = process.env.REMOTE_SSH_TERMINAL
+  process.env.REMOTE_SSH_TERMINAL = `bash ${bin}`
+  return {
+    dir,
+    async cleanup() {
+      if (previous === undefined) delete process.env.REMOTE_SSH_TERMINAL
+      else process.env.REMOTE_SSH_TERMINAL = previous
       await rm(dir, { recursive: true, force: true })
     },
   }

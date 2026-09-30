@@ -6,6 +6,7 @@ import { findTarget, manageSchema, manageTargets, readyTarget } from './manage.j
 import { makeReadTool, makeWriteTool, makeEditTool } from './tools/files.js'
 import { makeGlobTool, makeGrepTool } from './tools/search.js'
 import { makeBashTool, remoteJob } from './tools/bash.js'
+import { makeSudoTool } from './tools/sudo.js'
 
 const targetArg = z.string().min(1).describe('Exact target name from remote_ssh_targets list. Always select the intended host explicitly.')
 const resultOf = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }] })
@@ -42,7 +43,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
   register('remote_ssh_targets', 'List/add/update/remove SSH targets or connect/disconnect/check a ControlMaster. add/update verify the remote root and may open a terminal for authentication. Changes apply to the next call. No passwords are accepted or stored.', manageSchema,
     (args, signal) => manageTargets(args, storeFile, signal))
 
-  for (const make of [makeReadTool, makeWriteTool, makeEditTool, makeGlobTool, makeGrepTool, makeBashTool]) {
+  for (const make of [makeReadTool, makeWriteTool, makeEditTool, makeGlobTool, makeGrepTool, makeBashTool, makeSudoTool]) {
     // The tool schema is registered once for the whole server, so build it from
     // a target-less stub; each call rebuilds the tool with its routed target.
     const def = make({})

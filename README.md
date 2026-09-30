@@ -11,6 +11,7 @@ remote-ssh MCP 是一个基于 OpenSSH 的 Model Context Protocol（MCP）服务
 - **连接复用**：默认复用 OpenSSH ControlMaster 连接，认证一次后可在连接保留期内复用。
 - **远端免安装**：远端只需标准 Linux 环境，无需部署任何服务组件。
 - **后台任务持久化**：任务在远端独立运行，MCP 进程重启后仍可查询与管理。
+- **可提权执行**：`sudo` 工具以 root 运行单条命令；sudo 密码在本机新终端中输入，不经过 MCP 或模型。
 
 ## 架构
 
@@ -21,13 +22,13 @@ flowchart TB
 
     subgraph Local["本机"]
         CLI["cli.js · stdio 入口"]
-        Server["server.js · 注册 9 个工具<br/>参数校验、显式 target 路由、错误与取消处理"]
+        Server["server.js · 注册 10 个工具<br/>参数校验、显式 target 路由、错误与取消处理"]
         Manage["manage.js · 目标管理与连接准备"]
         Store["store.js / lock.js / target.js<br/>配置校验、原子保存、跨进程锁"]
         Targets[("targets.json · 目标配置")]
-        Tools["tools/files.js · read / write / edit<br/>tools/search.js · glob / grep<br/>tools/bash.js · bash / 任务操作"]
+        Tools["tools/files.js · read / write / edit<br/>tools/search.js · glob / grep<br/>tools/bash.js · bash / 任务操作<br/>tools/sudo.js · sudo"]
         SSH["ssh.js · 调用本机 OpenSSH<br/>连接预热、命令执行、超时与输出处理"]
-        Terminal["新终端窗口 · 标准 ssh 认证"]
+        Terminal["新终端窗口 · 标准 ssh / sudo 认证"]
         Master["ControlMaster · 本地 socket / 连接复用"]
 
         CLI --> Server
@@ -80,6 +81,7 @@ MCP 客户端通过 stdio 调用 `cli.js`。`server.js` 注册工具、校验参
 - Python 3.9 或更高版本
 - GNU 常用工具，包括 `stat`、`base64` 与 `grep`
 - 后台任务依赖 Linux `/proc`
+- `sudo` 工具要求远端允许无 tty 执行 sudo（sudoers 未启用 `requiretty`）
 
 ### 兼容性说明
 
@@ -188,6 +190,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | `glob` | 按 glob 模式匹配文件路径，最多返回 100 项 |
 | `grep` | POSIX 扩展正则搜索，最多返回 250 条 |
 | `bash` | 前台命令或后台任务；前台默认 120 秒，上限 600 秒 |
+| `sudo` | 以 root 执行单条前台命令；密码由用户在新终端输入 |
 | `job_output` | 任务状态与输出分页，以及结束后的清理 |
 | `job_kill` | 向任务进程组发送 SIGTERM，必要时 3 秒后发送 SIGKILL |
 
@@ -224,6 +227,16 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 ### 命令执行
 
 `bash` 在远端执行命令，每次调用启动新的 shell，命令以 SSH 账户的权限运行。前台命令默认超时 120 秒，上限 600 秒；`run_in_background: true` 时改为启动持久后台任务。
+
+### 提权执行（sudo）
+
+`sudo` 在远端以 root 权限执行单条前台命令。由于 sudo 需要密码，该工具会在运行 MCP 服务的本机新开一个终端窗口提示用户输入；用户输入的密码由终端直接通过已认证的 SSH stdin 管道传给远端的 `sudo -S`，不经过 MCP 进程、工具参数、模型或任何文件，也不会被回显或以 argv 形式出现。只有命令的标准输出、标准错误与退出码会返回。
+
+```json
+{"target":"gpu","command":"apt-get update","workdir":"/"}
+```
+
+远端命令通过 `sudo -S`（从 stdin 读取密码）执行，不分配远端 tty，以避免密码被回显。因此远端需要允许无 tty 的 sudo，即 sudoers 未启用 `requiretty`。工具仅支持前台执行，默认整体超时 300 秒、上限 600 秒，超时预算包含用户输入密码的时间；超时或取消时只终止本机 SSH 进程，远端命令可能继续运行。SSH 连接必须已经建立（工具调用前会自动完成连接准备），终端中的 ssh 使用 BatchMode，不会提示 SSH 凭据。
 
 ## 后台任务
 

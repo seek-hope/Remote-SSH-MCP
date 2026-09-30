@@ -66,7 +66,7 @@ function controlArgs(opts) {
 }
 
 /** Tool processes never prompt; authentication happens only in a terminal. */
-async function sshSpawn(opts, command) {
+export async function sshSpawn(opts, command) {
   const { target, port, controlPersist } = opts
   if (typeof target !== 'string' || !target || target.startsWith('-') || /[\s\0]/.test(target)) {
     throw new Error(`sshSpawn: target must be a non-empty ssh destination string (received ${typeof target})`)
@@ -606,11 +606,7 @@ const LINUX_TERMINALS = [
  * the user answer ssh's password/passphrase prompt interactively.
  * @returns {Promise<{ok: true, terminal: string} | {ok: false, error: string}>}
  */
-export async function openConnectTerminal(target) {
-  const command = buildConnectCommand(target)
-  if (command === undefined) {
-    return { ok: false, error: `ControlPersist is disabled for "${target.name}" (set controlPersist > 0 first)` }
-  }
+export async function runInTerminal(command) {
   await ensureControlDir()
 
   const override = process.env.REMOTE_SSH_TERMINAL
@@ -629,7 +625,8 @@ export async function openConnectTerminal(target) {
   }
 
   if (process.platform === 'darwin') {
-    const script = `tell application "Terminal" to do script ${JSON.stringify(command)}`
+    // Force bash so the command can rely on bash's `read` (the login shell may be zsh).
+    const script = `tell application "Terminal" to do script ${JSON.stringify(`bash -lc ${shq(command)}`)}`
     try {
       await spawnDetached('osascript', ['-e', script])
       return { ok: true, terminal: 'Terminal.app' }
@@ -641,7 +638,7 @@ export async function openConnectTerminal(target) {
   if (process.platform === 'win32') {
     return {
       ok: false,
-      error: 'automatic terminal launch is not implemented for Windows — set REMOTE_SSH_TERMINAL to a command that opens a terminal and appends the ssh command',
+      error: 'automatic terminal launch is not implemented for Windows — set REMOTE_SSH_TERMINAL to a command that opens a terminal and appends the shell command',
     }
   }
 
@@ -658,4 +655,17 @@ export async function openConnectTerminal(target) {
     ok: false,
     error: `no terminal emulator found (tried ${tried.join(', ')}). Set REMOTE_SSH_TERMINAL, e.g. REMOTE_SSH_TERMINAL='gnome-terminal -- bash -lc'`,
   }
+}
+
+/**
+ * Open a temporary terminal that connects `ssh` to `target` for interactive
+ * authentication, using the same command-connection options as tool calls.
+ * @returns {Promise<{ok: true, terminal: string} | {ok: false, error: string}>}
+ */
+export async function openConnectTerminal(target) {
+  const command = buildConnectCommand(target)
+  if (command === undefined) {
+    return { ok: false, error: `ControlPersist is disabled for "${target.name}" (set controlPersist > 0 first)` }
+  }
+  return runInTerminal(command)
 }
