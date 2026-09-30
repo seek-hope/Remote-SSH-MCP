@@ -296,13 +296,18 @@ npm test
 
 ## 形式化验证
 
-并发关键协议使用 TLA+ 建模并通过 TLC 穷举所有可达状态进行检查。当前覆盖目标配置锁；需要 Java 11+ 与 `tla2tools.jar`：
+并发与安全关键协议使用 TLA+ 建模，并通过 TLC 穷举所有可达状态进行检查。覆盖目标配置锁、连接预热去重、后台任务生命周期与 sudo 密码信息流；需要 Java 11+ 与 `tla2tools.jar`：
 
 ```sh
 TLA2TOOLS_JAR=/path/to/tla2tools.jar npm run verify
 ```
 
-`formal/Lock.tla` 验证修复后的锁协议满足互斥、闸门互斥与“规范路径不出现空壳”；`formal/LockHuskRace.tla` 保留修复前协议的反例，用于说明该次修复针对的真实竞态（创建者在 `mkdir` 与写 owner 之间停顿超过宽限期时，其按路径写入可能落入后继进程的锁目录，导致两者同时进入临界区）。详见 [`formal/README.md`](formal/README.md)，其中也列出了当前未纳入形式化范围的组件。
+- `formal/Lock.tla`：修复后的锁协议满足互斥、闸门互斥与“规范路径不出现空壳”；
+- `formal/Warmup.tla`：同一目的地在途预热至多一个，且不会并发打开认证终端或在失败缓存期内重弹终端；
+- `formal/Jobs.tla`：进程存活或输出未读尽时绝不删除任务目录，状态与记录事实一致；
+- `formal/Sudo.tla`：sudo 密码不出现在 MCP 状态、工具结果、磁盘、日志或 argv 中。
+
+同时保留四个“反设计”对照，TLC 必须仍然反证它们，以证明模型对该性质确实敏感：`LockHuskRace.tla`（`MutualExclusion`）、`WarmupNoDedup`（`NoConcurrentTerminals`）、`JobsUnsafe`（`NoUnreadOutputLost`）、`SudoViaMcp`（`Secrecy`）。其中 `LockHuskRace` 记录了一次真实修复：创建者在 `mkdir` 与写 owner 之间停顿超过宽限期时，其按路径写入可能落入后继进程的锁目录，导致两者同时进入临界区。详见 [`formal/README.md`](formal/README.md)。
 
 ## 许可证
 
