@@ -10,7 +10,7 @@ export async function remoteJob(target, request, signal) {
   const output = await sshExec({
     target: target.ssh, port: target.port, controlPersist: target.controlPersist,
     command: `python3 -c ${shq(JOB_SCRIPT)}`,
-    stdin: JSON.stringify(request), signal, timeoutMs: 30_000,
+    stdin: JSON.stringify(request), signal, timeoutMs: 120_000,
   })
   return JSON.parse(output.toString('utf8'))
 }

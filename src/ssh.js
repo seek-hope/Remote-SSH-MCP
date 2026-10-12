@@ -83,7 +83,7 @@ export async function sshSpawn(opts, command) {
     // `--` ends option parsing so a destination can never be read as an option.
     args: ['-T', ...SESSION_ARGS,
       '-o', 'SessionType=default', '-o', 'StdinNull=no', '-o', 'ForkAfterAuthentication=no',
-      '-o', 'ConnectTimeout=15', '-o', 'LogLevel=ERROR', '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes',
+      '-o', 'ConnectTimeout=20', '-o', 'LogLevel=ERROR', '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes',
       ...ctl, ...portOptionArgs, '--', target, `sh -c ${shq(script)}`],
   }
 }
@@ -281,7 +281,7 @@ export async function sshRun(opts) {
  * Run `ssh -O <op>` against a target's ControlPath (op: check|exit).
  * Resolves with { code, stdout, stderr }; never throws.
  */
-export async function sshControl(target, op, timeoutMs = 15_000) {
+export async function sshControl(target, op, timeoutMs = 20_000) {
   if (op !== 'check' && op !== 'exit') throw new Error(`sshControl: unsupported operation "${op}"`)
   if (process.platform === 'win32') {
     return { code: 255, stdout: '', stderr: 'ControlMaster control operations are not supported on Windows' }
