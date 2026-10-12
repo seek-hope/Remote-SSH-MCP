@@ -65,7 +65,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
     const target = await findTarget(storeFile, name)
     await readyTarget(target, signal)
     return remoteJob(target, { action: 'output', ...args }, signal)
-  }, true)
+  })
   register('job_kill', 'Terminate a remote background job process group (TERM, then KILL after 3 seconds). Output remains available through job_output.', z.strictObject(jobFields), async ({ target: name, ...args }, signal) => {
     const target = await findTarget(storeFile, name)
     await readyTarget(target, signal)

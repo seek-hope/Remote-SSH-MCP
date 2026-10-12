@@ -36,8 +36,8 @@
  * writers ordered.
  */
 
-import { readFile, writeFile, rename, rm, mkdir, stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile, writeFile, rename, rm, mkdir, stat, readdir } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 
@@ -85,6 +85,31 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const lockPathFor = (file) => `${file}.lock`
 const gatePathFor = (file) => `${file}.lock.recover`
 const ownerPathFor = (lockPath) => join(lockPath, 'owner')
+
+/**
+ * Remove orphaned staging directories left by crashed publishers. A staging
+ * directory `<path>.staging.<token>` is private to its token, so anything
+ * older than the grace can only belong to a creator that died before the
+ * atomic publish — deleting it is safe. Runs best-effort and never throws.
+ */
+async function cleanStaleStaging(path, graceMs) {
+  const dir = dirname(path)
+  const prefix = `${basename(path)}.staging.`
+  let names
+  try {
+    names = await readdir(dir)
+  } catch {
+    return
+  }
+  const now = Date.now()
+  await Promise.all(names.filter((n) => n.startsWith(prefix)).map(async (name) => {
+    const full = join(dir, name)
+    try {
+      const { mtimeMs } = await stat(full)
+      if (now - mtimeMs > graceMs) await rm(full, { recursive: true, force: true }).catch(() => {})
+    } catch { /* raced away already */ }
+  }))
+}
 
 /**
  * Test-only seams for store-lock.test.mjs (deterministic fault/race
@@ -178,6 +203,7 @@ async function gateLive(gatePath) {
  * @returns {Promise<boolean>} true when WE now hold the gate
  */
 async function enterGate(gatePath, token) {
+  await cleanStaleStaging(gatePath, GATE_STALE_MS)
   const staging = `${gatePath}.staging.${token}`
   try {
     await mkdir(staging)
@@ -257,14 +283,14 @@ async function recoverLock(lockPath, gatePath, token, graceMs) {
 }
 
 /**
- * Acquire the cross-process lock: atomic mkdir of the lock directory, owner
- * record write, and a read-back check that closes the create-vs-recovery
- * window (a recoverer that judged our empty in-flight lock stale must leave
- * us retrying — never holding a lock that was removed underneath us).
- * Acquirers also stay clear of an in-flight recovery: while a live recovery
- * gate exists they do not even attempt the create (its verdict may predate
- * our owner record), and after a successful create they wait any gate out
- * and re-confirm their token before trusting the lock.
+ * Acquire the cross-process lock: build the lock privately (owner record
+ * included) and publish it with an atomic rename, then re-read the owner
+ * record and proceed only when our own token is on disk. Acquirers also stay
+ * clear of an in-flight recovery: while a live recovery gate exists they do
+ * not even attempt the publish (its verdict may predate our owner record),
+ * and after a successful publish they wait any gate out and re-confirm their
+ * token before trusting the lock. Orphaned staging directories left by
+ * crashed publishers are swept once they pass the grace period.
  * @returns {Promise<{ lockPath: string, token: string }>}
  */
 async function acquireStoreLock(file, opts) {
@@ -281,6 +307,7 @@ async function acquireStoreLock(file, opts) {
     if (!(await gateLive(gatePath))) {
       const verdict = await judgeLock(lockPath, opts.graceMs)
       if (verdict !== 'held') {
+        await cleanStaleStaging(lockPath, opts.graceMs)
         // Build the lock PRIVATELY, owner record included, then publish it with
         // an atomic rename. The canonical path therefore only ever appears with
         // a complete owner record: a creator that stalls between mkdir and the
@@ -291,21 +318,25 @@ async function acquireStoreLock(file, opts) {
           await mkdir(staging)
           try {
             await (_lockTestHooks.writeOwner ?? writeOwnerRecord)(staging, token, lockPath)
-          } catch (e) {
+            try {
+              await rename(staging, lockPath)
+              created = true
+            } catch (e) {
+              // A non-empty or non-directory target means somebody else
+              // published first (Windows also reports an existing empty
+              // directory); ENOENT means our staging was swept by the cleanup
+              // above. Both are contention-ish: retry. Permission and I/O
+              // errors are surfaced, not swallowed.
+              if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'ENOENT'].includes(e?.code)) throw e
+            }
+          } finally {
             await rm(staging, { recursive: true, force: true }).catch(() => {})
-            throw e // a private-write failure is a real error, not contention
-          }
-          try {
-            await rename(staging, lockPath)
-            created = true
-          } catch (e) {
-            await rm(staging, { recursive: true, force: true }).catch(() => {})
-            // A non-empty or non-directory target means somebody else published
-            // first; Windows also reports an existing empty directory here.
-            if (!['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EPERM', 'EACCES'].includes(e?.code)) throw e
           }
         } catch (e) {
-          if (e?.code !== 'EEXIST') throw e // staging collision (practically impossible: token is unique)
+          // EEXIST on a unique staging name is practically impossible; ENOENT
+          // from the private owner write means the cleanup raced this create
+          // (retry). Everything else (EACCES, EIO, ...) is surfaced.
+          if (!['EEXIST', 'ENOENT'].includes(e?.code)) throw e
         }
       }
       if (created) {

@@ -534,3 +534,38 @@ test('a WEDGED live gate bounds even a verified acquisition (own verified lock g
   await rm(`${file}.lock.recover`, { recursive: true, force: true })
   await rm(dir, { recursive: true, force: true })
 })
+
+test('an orphaned lock-staging directory older than the grace is swept during acquisition', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-lock-stalestage-'))
+  const file = join(dir, 'targets.json')
+  await saveTargetStore(file, [])
+  const stale = `${file}.lock.staging.dead.token`
+  await mkdir(stale)
+  const past = new Date(Date.now() - 60_000)
+  await utimes(stale, past, past)
+  const value = await withStoreLock(file, async () => 'ran', { timeoutMs: 5000, graceMs: 1000, retryMs: 10 })
+  assert.equal(value, 'ran')
+  assert.ok(!(await readdir(dir)).includes('targets.json.lock.staging.dead.token'), 'aged staging dir was swept')
+  // A fresh staging dir may belong to a live creator and is left alone.
+  const fresh = `${file}.lock.staging.fresh.token`
+  await mkdir(fresh)
+  await withStoreLock(file, async () => {}, { timeoutMs: 5000, graceMs: 1000, retryMs: 10 })
+  assert.ok((await readdir(dir)).includes('targets.json.lock.staging.fresh.token'), 'fresh staging dir is left alone')
+  await rm(dir, { recursive: true, force: true })
+})
+
+test('an orphaned gate-staging directory older than the grace is swept during recovery', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-lock-gatestage-'))
+  const file = join(dir, 'targets.json')
+  await saveTargetStore(file, [])
+  const ghost = await deadPid()
+  await seedLock(file, { token: 'ghost.stale', pid: ghost }, { ageMs: 60_000 })
+  const stale = `${file}.lock.recover.staging.dead.token`
+  await mkdir(stale)
+  const past = new Date(Date.now() - 60_000)
+  await utimes(stale, past, past)
+  const value = await withStoreLock(file, async () => 'ran', { timeoutMs: 5000, graceMs: 1000, retryMs: 10 })
+  assert.equal(value, 'ran')
+  assert.ok(!(await readdir(dir)).includes('targets.json.lock.recover.staging.dead.token'), 'aged gate-staging dir was swept')
+  await rm(dir, { recursive: true, force: true })
+})
