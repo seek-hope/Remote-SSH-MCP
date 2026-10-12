@@ -82,7 +82,7 @@ print('__REMOTE_SSH_TOTAL__%d' % total)
 export function makeGlobTool(target, cwd = target.root) {
   return defTextTool({
     name: 'glob',
-    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in modification-time order, up to ${GLOB_CAP} paths. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/node_modules directories are skipped.`,
+    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in newest-modification-first order, up to ${GLOB_CAP} paths. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/.svn/.hg/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {
@@ -119,7 +119,7 @@ export function makeGlobTool(target, cwd = target.root) {
 export function makeGrepTool(target, cwd = target.root) {
   return defTextTool({
     name: 'grep',
-    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches. The remote host must run Linux. REMOTE: the search runs on the selected host; binary files and .git are skipped.`,
+    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches. The remote host must run Linux. REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {

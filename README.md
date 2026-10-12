@@ -236,7 +236,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 {"target":"gpu","command":"apt-get update","workdir":"/"}
 ```
 
-远端命令通过 `sudo -S`（从 stdin 读取密码）执行，不分配远端 tty，以避免密码被回显。因此远端需要允许无 tty 的 sudo，即 sudoers 未启用 `requiretty`。工具仅支持前台执行，默认整体超时 300 秒、上限 600 秒；超时预算包含用户输入密码的时间，密码提示本身的等待为 `min(150 秒, timeoutMs)`。超时或取消时只终止本机 SSH 进程，远端命令可能继续运行。SSH 连接必须已经建立（工具调用前会自动完成连接准备），终端中的 ssh 使用 BatchMode，不会提示 SSH 凭据。
+远端命令通过 `sudo -S`（从 stdin 读取密码）执行，不分配远端 tty，以避免密码被回显。因此远端需要允许无 tty 的 sudo，即 sudoers 未启用 `requiretty`。工具仅支持前台执行，`timeoutMs` 默认 300000 毫秒、上限 600000 毫秒；结果等待从终端启动后开始计时，覆盖 sudo 密码输入与命令执行，但不包含前置 SSH 连接准备和终端启动时间。密码提示等待按 `min(150000, timeoutMs)` 毫秒向上取整为秒（至少 1 秒）。超时或取消时会尝试终止已启动的本机 SSH 进程，远端命令可能继续运行；仍在读取密码的终端不保证立即关闭。重试有副作用的命令前应先检查远端状态；客户端的请求超时还需覆盖前置连接准备与终端启动时间。SSH 连接必须已经建立（工具调用前会自动完成连接准备），终端中的 ssh 使用 BatchMode，不会提示 SSH 凭据。
 
 ## 后台任务
 
@@ -252,11 +252,13 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 {"target":"gpu","job_id":"<job_id>","offset":0,"limit":65536}
 ```
 
-结果包含 `status`、`exit_code`、`output`、`next_offset` 与 `has_more`。将 `next_offset` 作为下一次调用的 `offset` 可无重复地继续读取。状态为 `running` 时暂时没有输出，并不表示任务已经结束。
+结果包含 `status`、`exit_code`、`output`、`next_offset` 与 `has_more`，输出合并 stdout 与 stderr。`offset` 是从 0 开始的字节偏移，不是行号；`limit` 以字节计，默认及上限均为 65536。将 `next_offset` 作为下一次调用的 `offset` 可无重复地继续读取。`has_more: false` 只表示当前没有更多输出，并不表示任务已经结束，应同时检查 `status` 和 `exit_code`。
+
+后台模式忽略 `bash.timeoutMs`，任务本身没有运行时限；启动、查询与终止任务的 SSH 请求超时均为 120 秒，不包含前置连接准备。如果启动失败信息中包含 `job_id`，应先查询该 ID，避免重复启动。
 
 `job_kill` 使用相同的 `target` 与 `job_id`，向任务进程组发送 SIGTERM；若 3 秒后仍未结束，则发送 SIGKILL。输出仍可通过 `job_output` 读取。
 
-任务状态与输出默认保存在远端 `~/.cache/remote-ssh/jobs/<job_id>/`。任务在 MCP 进程退出后继续运行，重启后凭相同目标与 ID 可继续查询。目标改名后需使用新名称；更改 SSH 主机后，旧任务仍保留在原主机。日志不会自动删除，也不限制磁盘占用；任务结束且输出读取完毕后，可用 `job_output` 的 `cleanup: true` 删除该任务记录。`status` 为 `completed` 仅表示进程已结束，成功与否需检查 `exit_code`。
+任务状态与输出默认保存在远端 `~/.cache/remote-ssh/jobs/<job_id>/`。任务在 MCP 进程退出后继续运行，重启后凭相同目标与 ID 可继续查询。目标改名后需使用新名称；更改 SSH 主机后，旧任务仍保留在原主机。日志不会自动删除，也不限制磁盘占用；任务结束且当前读取块后没有更多输出时，可用 `job_output` 的 `cleanup: true` 永久删除任务记录及日志。服务不追踪此前的读取进度，调用方应先读取所有需要保留的内容。`status` 为 `completed` 仅表示进程已结束，成功与否需检查 `exit_code`。
 
 前台命令超时或被取消时，只会终止本机 SSH 进程，远端命令可能继续运行；需要可靠终止时应使用后台任务。任务主动创建新会话或守护进程的子进程可能脱离任务进程组。
 

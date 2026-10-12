@@ -14,7 +14,14 @@ const resultOf = value => ({ content: [{ type: 'text', text: typeof value === 's
 export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE || join(homedir(), '.config', 'remote-ssh', 'targets.json') } = {}) {
   storeFile = resolve(storeFile)
   const server = new McpServer({ name: 'remote-ssh', version: '1.0.0' }, {
-    instructions: 'Use remote_ssh_targets to list or manage hosts. Every workspace/job tool requires target. All paths are remote; relative paths use the configured root, which is a working directory, not a sandbox. Authentication may open a local terminal: the user enters passwords/passphrases directly into OpenSSH. Never ask for or pass a password to MCP. Read files before editing. For long commands use bash run_in_background then job_output/job_kill. Job IDs and logs survive MCP restarts; cleanup completed jobs with job_output cleanup:true.',
+    instructions: [
+      'Use remote_ssh_targets to list or manage hosts. Every workspace/job tool requires an explicit target; there is no current host.',
+      'Workspace paths are remote; relative paths use the target root, a working directory, not a sandbox. Each bash call starts a fresh shell. Read files before editing.',
+      'SSH authentication may open a terminal on the machine running this service; the user enters SSH passwords/passphrases directly into OpenSSH. Use the sudo tool for commands requiring root: its terminal script reads the sudo password and pipes it over SSH. Never request passwords in chat or put them in commands or tool arguments.',
+      'Connection preparation precedes command timeouts; allow extra time for it in the MCP client request timeout. A foreground timeout or cancellation does not guarantee that the remote command stopped. Check remote state before retrying commands with side effects.',
+      'For long commands use bash run_in_background, then job_output/job_kill with the same target and job_id. If launch fails with a job_id, query that ID before launching again. Jobs and logs survive MCP restarts.',
+      'Paginate job_output with next_offset. has_more:false is not proof of completion; check status and exit_code. Only clean up finished jobs after consuming the needed output; cleanup:true permanently deletes the job record and logs.',
+    ].join('\n'),
   })
   // ponytail: SDK 2.0.0's _oncancel drops falsy requestId, so cancelling the
   // connection's first request (id 0) never aborts the handler. Abort it here;
@@ -40,7 +47,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
       }
     })
   }
-  register('remote_ssh_targets', 'List/add/update/remove SSH targets or connect/disconnect/check a ControlMaster. add/update verify the remote root and may open a terminal for authentication. Changes apply to the next call. No passwords are accepted or stored.', manageSchema,
+  register('remote_ssh_targets', 'List/add/update/remove SSH targets or connect/disconnect/check a ControlMaster. add/update verify the remote root and may open a terminal for authentication. Changes apply to the next call. remove deletes only the target configuration, not remote files or jobs. disconnect closes a shared ControlMaster and may interrupt other calls using it. No passwords are accepted or stored.', manageSchema,
     (args, signal) => manageTargets(args, storeFile, signal))
 
   for (const make of [makeReadTool, makeWriteTool, makeEditTool, makeGlobTool, makeGrepTool, makeBashTool, makeSudoTool]) {
@@ -58,15 +65,18 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
     }, ['read', 'glob', 'grep'].includes(def.name))
   }
 
-  const jobFields = { target: targetArg, job_id: z.uuid() }
-  register('job_output', 'Read a remote background job status and output. Reuse next_offset to paginate without duplicates. IDs survive MCP restarts. cleanup:true deletes a finished job after its last output chunk.', z.strictObject({
-    ...jobFields, offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(65536).optional(), cleanup: z.boolean().optional(),
+  const jobFields = { target: targetArg, job_id: z.uuid().describe('Job ID returned by background bash or its launch error. Use the same remote host/account that started the job.') }
+  register('job_output', 'Read remote job status and merged stdout/stderr. Reuse next_offset for byte pagination. has_more:false means no more output currently, not that the job ended. completed does not mean success: check exit_code. IDs survive MCP restarts. The SSH request timeout is 120 seconds, excluding connection preparation; it does not limit job runtime.', z.strictObject({
+    ...jobFields,
+    offset: z.number().int().nonnegative().optional().describe('0-based byte offset, not a line number. Default 0; pass next_offset from the previous result to continue.'),
+    limit: z.number().int().min(1).max(65536).optional().describe('Maximum output bytes to read; default and maximum 65536.'),
+    cleanup: z.boolean().optional().describe('Default false. Permanently delete the job record and logs after this read. Requires a finished job and no more output after this chunk; consume needed earlier chunks first.'),
   }), async ({ target: name, ...args }, signal) => {
     const target = await findTarget(storeFile, name)
     await readyTarget(target, signal)
     return remoteJob(target, { action: 'output', ...args }, signal)
   })
-  register('job_kill', 'Terminate a remote background job process group (TERM, then KILL after 3 seconds). Output remains available through job_output.', z.strictObject(jobFields), async ({ target: name, ...args }, signal) => {
+  register('job_kill', 'Terminate a remote background job process group (TERM, then KILL after 3 seconds if still alive). Detached descendants may escape the group. Output remains available through job_output. The SSH request timeout is 120 seconds, excluding connection preparation; query job_output to check state after a request failure.', z.strictObject(jobFields), async ({ target: name, ...args }, signal) => {
     const target = await findTarget(storeFile, name)
     await readyTarget(target, signal)
     return remoteJob(target, { action: 'kill', ...args }, signal)

@@ -18,15 +18,15 @@ export async function remoteJob(target, request, signal) {
 export function makeBashTool(target, cwd = target.root) {
   return defTextTool({
     name: 'bash',
-    description: 'Execute bash on the selected remote host. Each call starts a fresh shell. Commands have the SSH account permissions. Background jobs return a job_id; use job_output/job_kill with the same target. Remote Linux requires bash and python3.',
+    description: 'Execute bash on the selected remote host. Each call starts a fresh shell. Commands have the SSH account permissions. Background jobs return a job_id; use job_output/job_kill with the same target. If a launch error includes a job_id, query it before retrying to avoid duplicate execution. Remote Linux requires bash and python3.',
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', minLength: 1, description: 'Bash command to run on the remote host.' },
         description: { type: 'string', description: 'Short description of the command.' },
         workdir: { type: 'string', description: 'Remote working directory; relative to target root by default.' },
-        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000, description: 'Foreground timeout in milliseconds; default 120000, cap 600000. The remote process may survive a timeout.' },
-        run_in_background: { type: 'boolean', description: 'Start a persistent remote job with no command timeout.' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000, description: 'Foreground SSH request timeout in milliseconds; default 120000, cap 600000. Excludes prior connection preparation. Ignored in background mode. The remote process may survive timeout or cancellation; check state before retrying.' },
+        run_in_background: { type: 'boolean', description: 'Start a persistent remote job with no runtime limit; timeoutMs is ignored. The launch SSH request has a 120-second timeout, excluding connection preparation.' },
       },
       required: ['command'],
     },

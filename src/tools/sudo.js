@@ -11,13 +11,13 @@ import { checkArgs, defTextTool } from '../toolkit.js'
 export function makeSudoTool(target, cwd = target.root) {
   return defTextTool({
     name: 'sudo',
-    description: 'Run a command as root on the selected remote host via sudo. A new terminal on the machine running this service asks the user for the sudo password; the password is piped to sudo over SSH and never reaches the model or this service. Foreground only; the remote host must permit `sudo -S` without a tty (the sudoers `requiretty` default must be off).',
+    description: 'Run a command as root on the selected remote host via sudo. A new terminal on the machine running this service asks the user for the sudo password; the password is piped to sudo over SSH and never reaches the model or this service. Foreground only; timeout or cancellation only terminates the local SSH process and the remote command may continue. Check remote state before retrying. The remote host must permit `sudo -S` without a tty (the sudoers `requiretty` default must be off).',
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', minLength: 1, description: 'Command to run as root on the remote host.' },
         workdir: { type: 'string', description: 'Remote working directory; relative to the target root by default.' },
-        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000, description: 'Overall timeout in milliseconds; default 300000, cap 600000. Includes the time the user needs to authenticate.' },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000, description: 'Result-wait timeout in milliseconds after terminal launch; default 300000, cap 600000. Covers sudo password entry and command execution, but excludes prior SSH connection preparation and terminal launch. Password-entry timeout is min(150000, timeoutMs), rounded up to whole seconds (minimum 1 second); cancellation may leave the prompt open.' },
       },
       required: ['command'],
     },

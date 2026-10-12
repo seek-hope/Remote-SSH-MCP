@@ -94,9 +94,11 @@ async function killLocalSsh(pidFile) {
  * @param {object} options
  * @param {string} options.command    command to run under sudo
  * @param {string} options.workdir    remote absolute working directory
- * @param {number} [options.timeoutMs]      overall budget, default 300s
+ * @param {number} [options.timeoutMs]      result-wait budget after terminal launch,
+ *   default 300s; excludes prior SSH connection preparation and terminal launch
  * @param {number} [options.promptTimeoutMs] password-entry budget, default 150s;
- *   capped by `timeoutMs` so the terminal never outlives the overall wait
+ *   capped by `timeoutMs`, then rounded up to whole seconds (minimum 1s).
+ *   Cancellation does not guarantee that a terminal still reading input closes.
  * @param {AbortSignal} [options.signal]
  * @returns {Promise<{ok: true, code: number|null, stdout: string, stderr: string}
  *   | {ok: false, error: string, timedOut?: boolean, code?: number|null, stdout?: string, stderr?: string}>}

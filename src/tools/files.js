@@ -186,7 +186,7 @@ export function makeWriteTool(target, cwd = target.root) {
 export function makeEditTool(target, cwd = target.root) {
   return defTextTool({
     name: 'edit',
-    description: 'Edit an existing UTF-8 text file by replacing literal text. The remote host must run Linux. REMOTE: the edit is applied on the selected host. Read the file first (the read-before-edit policy still applies by convention).',
+    description: 'Edit an existing UTF-8 text file by replacing literal text. The remote host must run Linux. REMOTE: the edit is applied on the selected host. Read the file first. Files larger than 4 MiB are rejected. The mtime/size check detects some concurrent changes but is not a lock; on a conflict, re-read and reconcile before retrying.',
     parameters: {
       type: 'object',
       properties: {
