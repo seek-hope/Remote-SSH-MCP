@@ -95,7 +95,8 @@ async function killLocalSsh(pidFile) {
  * @param {string} options.command    command to run under sudo
  * @param {string} options.workdir    remote absolute working directory
  * @param {number} [options.timeoutMs]      overall budget, default 300s
- * @param {number} [options.promptTimeoutMs] password-entry budget, default 150s
+ * @param {number} [options.promptTimeoutMs] password-entry budget, default 150s;
+ *   capped by `timeoutMs` so the terminal never outlives the overall wait
  * @param {AbortSignal} [options.signal]
  * @returns {Promise<{ok: true, code: number|null, stdout: string, stderr: string}
  *   | {ok: false, error: string, timedOut?: boolean, code?: number|null, stdout?: string, stderr?: string}>}
@@ -120,7 +121,7 @@ export async function runSudoCommand(target, { command, workdir, timeoutMs = DEF
       exit,
       sshPid,
       prompt: `sudo password for ${target.name}: `,
-      promptTimeoutSeconds: Math.max(1, Math.ceil(promptTimeoutMs / 1000)),
+      promptTimeoutSeconds: Math.max(1, Math.ceil(Math.min(promptTimeoutMs, timeoutMs) / 1000)),
     })
     const opened = await runInTerminal(script)
     if (!opened.ok) {
