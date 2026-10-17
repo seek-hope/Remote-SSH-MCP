@@ -1,37 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
+import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { makeEditTool, makeWriteTool } from '../src/tools/files.js'
+import { installLocalSsh } from './helpers.mjs'
 
-// Execute the generated remote shell locally, confined to a temporary fixture.
-// No SSH server or network connection is involved.
 async function withLocalSsh(run) {
-  const dir = await mkdtemp(join(tmpdir(), 'remote-file-integration-'))
-  const originalPath = process.env.PATH
-  const bin = join(dir, 'ssh')
-  await writeFile(bin, `#!/usr/bin/env node
-const { spawnSync } = require('node:child_process')
-const { writeFileSync } = require('node:fs')
-const command = process.argv.at(-1)
-const encoded = command.match(/printf %s ([A-Za-z0-9+/=]+) \\| base64 -d/)
-const script = encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : command
-if (script.startsWith('if base64') && process.env.REMOTE_SSH_TEST_CONFLICT_FILE) {
-  writeFileSync(process.env.REMOTE_SSH_TEST_CONFLICT_FILE, 'concurrent edit with a different size')
-}
-const result = spawnSync('bash', ['-c', command], { stdio: 'inherit', cwd: ${JSON.stringify(dir)} })
-process.exit(result.status ?? 1)
-`)
-  await chmod(bin, 0o755)
-  process.env.PATH = `${dir}:${originalPath}`
-  const target = { ssh: 'local-fixture', name: 'fixture', controlPersist: 0 }
+  const fake = await installLocalSsh()
+  const target = { ssh: 'local-fixture', name: 'fixture', controlPersist: 0, root: fake.dir }
   try {
-    await run(dir, makeEditTool(target, dir, p => p), makeWriteTool(target, dir, p => p))
+    await run(fake.dir, makeEditTool(target), makeWriteTool(target))
   } finally {
-    process.env.PATH = originalPath
-    delete process.env.REMOTE_SSH_TEST_CONFLICT_FILE
-    await rm(dir, { recursive: true, force: true })
+    await fake.cleanup()
   }
 }
 
@@ -57,14 +38,21 @@ test('remote edit refuses invalid UTF-8 without rewriting the original bytes', a
   })
 })
 
-test('remote edit conflict treats shell syntax in a filename as literal text', async () => {
-  await withLocalSsh(async (dir, edit) => {
+test('remote edit detects a change during temp-file commit and treats filenames literally', async () => {
+  await withLocalSsh(async (dir) => {
     const file = join(dir, "quote'$(touch INJECTED).txt")
     await writeFile(file, 'original')
-    process.env.REMOTE_SSH_TEST_CONFLICT_FILE = file
-    await assert.rejects(edit.execute({ file_path: file, old_string: 'original', new_string: 'next' }, {}), /re-read/)
+    const helper = await readFile(new URL('../src/files.py', import.meta.url), 'utf8')
+    // Inject an external writer at fchmod, before the final stat guard. No
+    // production test hook or extra SSH round trip is needed.
+    const injection = `import os, sys\nfrom pathlib import Path\nreal = os.fchmod\ndef changed(fd, mode):\n    Path(sys.argv[2]).write_text('concurrent edit with a different size')\n    real(fd, mode)\nos.fchmod = changed\n`
+    const result = spawnSync('python3', ['-c', injection + helper, 'edit', file], {
+      input: JSON.stringify({ old_string: 'original', new_string: 'next' }), encoding: 'utf8', timeout: 5000,
+    })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /re-read/)
     assert.equal(await readFile(file, 'utf8'), 'concurrent edit with a different size')
-    assert.deepEqual((await readdir(dir)).sort(), ["quote'$(touch INJECTED).txt", 'ssh'])
+    assert.ok(!(await readdir(dir)).some(name => name.startsWith('.remote-ssh-tmp-') || name === 'INJECTED'))
   })
 })
 
@@ -74,5 +62,21 @@ test('remote write rejects a trailing high surrogate before touching the file', 
     await writeFile(file, 'original')
     await assert.rejects(write.execute({ file_path: file, content: 'broken\ud800' }, {}), /UTF-8/)
     assert.equal(await readFile(file, 'utf8'), 'original')
+  })
+})
+
+test('remote writes fail closed if preserving existing permissions fails', async () => {
+  await withLocalSsh(async (dir) => {
+    const file = join(dir, 'private')
+    await writeFile(file, 'original')
+    const helper = await readFile(new URL('../src/files.py', import.meta.url), 'utf8')
+    const injection = `import os\ndef fail(*args):\n    raise PermissionError('permission-copy failed')\nos.fchmod = fail\n`
+    const result = spawnSync('python3', ['-c', injection + helper, 'edit', file], {
+      input: JSON.stringify({ old_string: 'original', new_string: 'next' }), encoding: 'utf8', timeout: 5000,
+    })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /permission-copy failed/)
+    assert.equal(await readFile(file, 'utf8'), 'original')
+    assert.ok(!(await readdir(dir)).some(name => name.startsWith('.remote-ssh-tmp-')))
   })
 })

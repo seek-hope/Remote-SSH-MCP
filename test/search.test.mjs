@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GLOB_PY, makeGrepTool } from '../src/tools/search.js'
@@ -28,6 +28,40 @@ test('glob translate: [!...] negation, depth anchoring, exact end anchor', async
     assert.deepEqual(run('foo'), [])
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('glob keeps the newest top-k entries, exact total and stable equal-mtime order', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-heap-'))
+  try {
+    for (let i = 0; i < 350; i++) {
+      const file = join(dir, `${i}.txt`)
+      await writeFile(file, '')
+      const time = 1700000000 + Math.floor(i / 3)
+      await utimes(file, time, time)
+    }
+    const run = cap => execFileSync('python3', ['-c', GLOB_PY, '*.txt', dir, String(cap)], { encoding: 'utf8' }).trimEnd().split('\n')
+    const all = run(1000)
+    const capped = run(100)
+    assert.equal(capped.pop(), '__REMOTE_SSH_TOTAL__350')
+    assert.equal(all.pop(), '__REMOTE_SSH_TOTAL__350')
+    assert.deepEqual(capped, all.slice(0, 100))
+    assert.ok(capped[0].endsWith('348.txt') || capped[0].endsWith('349.txt'))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('grep refuses a transport-truncated structured result', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_BIG = String(5 * 1024 * 1024)
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    await assert.rejects(makeGrepTool(target, '/remote').execute({ pattern: 'x' }, exec), /output exceeded the transport limit/)
+  } finally {
+    delete process.env.FAKE_SSH_BIG
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
   }
 })
 

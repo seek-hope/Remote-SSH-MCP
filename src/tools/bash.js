@@ -47,7 +47,8 @@ export function makeBashTool(target, cwd = target.root) {
         timeoutMs: a.timeoutMs ?? 120000, maxStdout: 512 * 1024,
       })
       let output = result.stdout
-      if (result.stderr) output += `\n[stderr]\n${result.stderr}`
+      if (result.stdoutTruncated) output = '[stdout truncated; showing the tail]\n' + output
+      if (result.stderr) output += `\n[stderr${result.stderrTruncated ? ' truncated; showing the tail' : ''}]\n${result.stderr}`
       if (result.timedOut) output += '\n[command timed out; the remote process may still be running]'
       return `${output}\n[exit code: ${result.code ?? 'unknown'}]`
     },

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { buildConnectCommand, openConnectTerminal, sshExec, sshRun } from '../src/ssh.js'
+import { buildConnectCommand, openConnectTerminal, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
 import { installFakeSsh } from './helpers.mjs'
 
 test('command and authentication sessions isolate interactive SSH settings but preserve the route and identity', async () => {
@@ -40,7 +40,8 @@ test('command and authentication sessions isolate interactive SSH settings but p
       })
       assert.equal(native.status, 0, native.stderr)
       for (const line of ['hostname server.example.invalid', 'user configured-user', 'port 2200',
-        'identityfile /test/configured-key', 'proxyjump configured-jump', 'requesttty false', 'clearallforwardings yes']) {
+        'identityfile /test/configured-key', 'proxyjump configured-jump', 'requesttty false', 'clearallforwardings yes',
+        'serveraliveinterval 30', 'serveralivecountmax 3']) {
         // OpenSSH releases print RequestTTY=no as either "no" or "false".
         assert.ok(native.stdout.replace('requesttty no', 'requesttty false').includes(line), line)
       }
@@ -57,6 +58,30 @@ test('command and authentication sessions isolate interactive SSH settings but p
   } finally {
     delete process.env.FAKE_SSH_MARK
     await fake.cleanup()
+  }
+})
+
+test('headless and terminal keepalive overrides are consistent and validated', async () => {
+  const keys = ['REMOTE_SSH_SERVER_ALIVE_INTERVAL', 'REMOTE_SSH_SERVER_ALIVE_COUNT_MAX']
+  const before = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+  try {
+    process.env.REMOTE_SSH_SERVER_ALIVE_INTERVAL = '15'
+    process.env.REMOTE_SSH_SERVER_ALIVE_COUNT_MAX = '5'
+    const spec = await sshSpawn({ target: 'offline', controlPersist: 0 }, 'true')
+    const terminal = buildConnectCommand({ ssh: 'offline' })
+    for (const option of ['ServerAliveInterval=15', 'ServerAliveCountMax=5']) {
+      assert.ok(spec.args.includes(option))
+      assert.ok(terminal.includes(option))
+    }
+    process.env.REMOTE_SSH_SERVER_ALIVE_INTERVAL = '0'
+    assert.ok((await sshSpawn({ target: 'offline', controlPersist: 0 }, 'true')).args.includes('ServerAliveInterval=0'))
+    process.env.REMOTE_SSH_SERVER_ALIVE_INTERVAL = '-1'
+    await assert.rejects(sshSpawn({ target: 'offline', controlPersist: 0 }, 'true'), /REMOTE_SSH_SERVER_ALIVE_INTERVAL/)
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 })
 

@@ -15,6 +15,8 @@ test('sshRun keeps the exit code for >4MiB output (default maxStdout)', async ()
     assert.equal(r.code, 7)
     assert.ok(r.stdout.endsWith('ZZZ_TAIL'), 'tail must be preserved')
     assert.ok(r.stdout.length <= 4 * MiB, 'stdout must be bounded')
+    assert.equal(r.stdoutTruncated, true)
+    assert.equal(r.stderrTruncated, false)
   } finally {
     delete process.env.FAKE_SSH_BIG
     delete process.env.FAKE_SSH_TAIL
@@ -50,6 +52,8 @@ test('sshRun caps stderr memory', async () => {
     const r = await sshRun({ target: 'h', command: 'ignored', controlPersist: 0, maxStderr: 4096 })
     assert.equal(r.code, 0)
     assert.equal(r.stderr.length, 4096)
+    assert.equal(r.stderrTruncated, true)
+    assert.equal(r.stdoutTruncated, false)
     assert.ok(/^E+$/.test(r.stderr), 'stderr is a suffix of the emitted bytes')
   } finally {
     delete process.env.FAKE_SSH_MARK

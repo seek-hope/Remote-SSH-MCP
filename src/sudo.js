@@ -18,7 +18,7 @@
  * uses BatchMode and never prompts for the SSH credentials.
  */
 
-import { mkdtemp, chmod, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, chmod, open, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { sshSpawn, shq, runInTerminal } from './ssh.js'
@@ -73,6 +73,24 @@ async function waitForExit(path, { timeoutMs, signal }) {
     }
     if (Date.now() >= deadline) return false
     await delay(100)
+  }
+}
+
+/** Read a bounded tail without materializing arbitrarily large output files. */
+export async function readOutputTail(path, limit = 512 * 1024) {
+  let file
+  try {
+    file = await open(path, 'r')
+    const { size } = await file.stat()
+    const buffer = Buffer.alloc(Math.min(size, limit))
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, Math.max(0, size - limit))
+    const text = buffer.subarray(0, bytesRead).toString('utf8')
+    return size > limit ? `[output truncated to last ${limit} bytes]\n${text}` : text
+  } catch (error) {
+    if (error?.code === 'ENOENT') return ''
+    throw error
+  } finally {
+    await file?.close()
   }
 }
 
@@ -133,8 +151,8 @@ export async function runSudoCommand(target, { command, workdir, timeoutMs = DEF
     if (!finished) await killLocalSsh(sshPid)
     const [rawExit, stdout, stderr] = await Promise.all([
       readFile(exit, 'utf8').catch(() => ''),
-      readFile(out, 'utf8').catch(() => ''),
-      readFile(err, 'utf8').catch(() => ''),
+      readOutputTail(out),
+      readOutputTail(err, 64 * 1024),
     ])
     const code = Number.parseInt(rawExit.trim(), 10)
     if (!finished) {

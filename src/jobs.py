@@ -9,24 +9,66 @@ import subprocess
 import sys
 import time
 
-# The worker owns a process group and records even `exit` in the user's shell.
+# The worker stays alive until all non-zombie members of its process group
+# finish, not just the immediate shell. It owns TERM/KILL escalation itself:
+# its live PID pins the process group identity while it sends signals, and
+# killing/cancelling the SSH request cannot interrupt the escalation.
 WORKER = r'''
-import json, os, signal, subprocess, sys
+import json, os, signal, subprocess, sys, time
 from pathlib import Path
 job = Path(sys.argv[1])
 request = json.loads((job / 'request.json').read_text())
-signal.signal(signal.SIGTERM, lambda *_: None)
+pid = os.getpid()
+stopping = None
+
+def terminate(*_):
+    global stopping
+    if stopping is None:
+        stopping = time.monotonic()
+        (job / 'killed').touch()
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+signal.signal(signal.SIGTERM, terminate)
 stamp = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
-(job / 'state.tmp').write_text(json.dumps({'pid': os.getpid(), 'stamp': stamp}))
+(job / 'state.tmp').write_text(json.dumps({'pid': pid, 'stamp': stamp, 'version': 2}))
 (job / 'state.tmp').replace(job / 'state.json')
+
+def members_remain():
+    for entry in os.scandir('/proc'):
+        if not entry.name.isdigit() or int(entry.name) == pid:
+            continue
+        try:
+            info = Path(entry.path, 'stat').read_text().rsplit(')', 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if info[0] != 'Z' and int(info[2]) == pid and int(info[3]) == pid:
+            return True
+    return False
+
 try:
     child = subprocess.Popen(['bash', '-c', request['command']], cwd=request['workdir'], stdin=subprocess.DEVNULL)
-    code = child.wait()
 except Exception as error:
     print(str(error), file=sys.stderr, flush=True)
-    code = 127
-(job / 'exit.tmp').write_text(str(code))
-(job / 'exit.tmp').replace(job / 'exit')
+    child = None
+recorded = False
+while True:
+    code = child.poll() if child is not None else 127
+    if code is not None:
+        if not recorded:
+            (job / 'exit.tmp').write_text(str(code))
+            (job / 'exit.tmp').replace(job / 'exit')
+            recorded = True
+        if not members_remain():
+            break
+    if stopping is not None and time.monotonic() - stopping >= 3:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.05)
 '''
 
 
@@ -34,8 +76,32 @@ def alive(state):
     try:
         stat = Path('/proc/%s/stat' % state['pid']).read_text().rsplit(')', 1)[1].split()
         return stat[0] != 'Z' and stat[19] == state['stamp']
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
+
+
+def signal_worker(state, sig):
+    # pidfd ties delivery to a specific process on supported Linux kernels.
+    # Re-check the saved start time after opening it to reject PID reuse.
+    if hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'):
+        try:
+            fd = os.pidfd_open(state['pid'])
+        except OSError:
+            pass  # vanished, EMFILE, or an old kernel: use the checked fallback
+        else:
+            try:
+                if alive(state):
+                    signal.pidfd_send_signal(fd, sig)
+            except OSError:
+                pass  # worker exited between the check and delivery
+            finally:
+                os.close(fd)
+            return
+    if alive(state):
+        try:
+            os.kill(state['pid'], sig)
+        except ProcessLookupError:
+            pass
 
 
 def main():
@@ -67,12 +133,22 @@ def main():
     if action == 'kill' and alive(state):
         (job / 'killed').touch()
         try:
-            os.killpg(state['pid'], signal.SIGTERM)
-            deadline = time.monotonic() + 3
-            while alive(state) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if alive(state):
-                os.killpg(state['pid'], signal.SIGKILL)
+            if state.get('version', 1) >= 2:
+                signal_worker(state, signal.SIGTERM)
+                deadline = time.monotonic() + 4
+                while alive(state) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                # If a stopped/unresponsive worker remains, report running,
+                # not killed. The worker escalates when it can run again.
+            else:
+                # Compatibility for jobs started by an older release. Their
+                # worker cannot be hot-upgraded and has the old guarantees.
+                os.killpg(state['pid'], signal.SIGTERM)
+                deadline = time.monotonic() + 3
+                while alive(state) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if alive(state):
+                    os.killpg(state['pid'], signal.SIGKILL)
         except ProcessLookupError:
             pass
     if action not in ('output', 'kill'):

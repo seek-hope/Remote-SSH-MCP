@@ -18,7 +18,7 @@ const GREP_CAP = 250
  * `{a,b}` alternation supported. .git/.svn/.hg are skipped.
  */
 export const GLOB_PY = String.raw`
-import os, re, sys
+import heapq, os, re, sys
 
 pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
@@ -60,6 +60,7 @@ def translate(pat):
 rx = re.compile('^' + translate(pattern) + r'\Z')
 basename_mode = '/' not in pattern
 results = []
+total = 0
 skipped_dirs = {'.git', '.svn', '.hg', 'node_modules'}
 for dirpath, dirnames, filenames in os.walk(root):
     dirnames[:] = [d for d in dirnames if d not in skipped_dirs]
@@ -69,12 +70,18 @@ for dirpath, dirnames, filenames in os.walk(root):
         subject = name if basename_mode else rel
         if rx.match(subject):
             try:
-                results.append((os.path.getmtime(full), full))
+                mtime = os.path.getmtime(full)
             except OSError:
-                results.append((0.0, full))
-results.sort(key=lambda t: -t[0])
-total = len(results)
-for _, p in results[:cap]:
+                mtime = 0.0
+            # Keep only the best cap entries. The sequence breaks equal-mtime
+            # ties in the same traversal order as the previous stable sort.
+            item = (mtime, -total, full)
+            total += 1
+            if len(results) < cap:
+                heapq.heappush(results, item)
+            elif item > results[0]:
+                heapq.heapreplace(results, item)
+for _, _, p in sorted(results, reverse=True):
     print(p)
 print('__REMOTE_SSH_TOTAL__%d' % total)
 `.trim()
@@ -102,6 +109,7 @@ export function makeGlobTool(target, cwd = target.root) {
       })
       if (r.timedOut) throw new Error(`glob: search timed out on ${target.name}`)
       if (r.code !== 0) throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
+      if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
       const lines = r.stdout.trimEnd().split('\n')
       const marker = lines.pop() || ''
       if (!marker.startsWith('__REMOTE_SSH_TOTAL__')) throw new Error(`glob: unexpected remote output (no total marker)`)
@@ -142,6 +150,7 @@ export function makeGrepTool(target, cwd = target.root) {
       const r = await sshRun({ target: target.ssh, port: target.port, command: script, signal: exec.signal, controlPersist: target.controlPersist })
       if (r.timedOut) throw new Error(`grep: search timed out on ${target.name}`)
       if (r.code !== 0) throw new Error(`grep: search failed on ${target.name}: ${r.stderr.trim() || 'remote command did not complete'}`)
+      if (r.stdoutTruncated) throw new Error('grep: output exceeded the transport limit; narrow the pattern or path (very long matching lines)')
       const raw = r.stdout
       if (raw.startsWith('__REMOTE_SSH_ERR__:no-such-path')) throw new Error(`grep: no such path on ${target.name}: ${root}`)
       const lines = raw.split('\n').filter(Boolean)

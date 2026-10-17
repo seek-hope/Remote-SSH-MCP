@@ -37,6 +37,22 @@ const SESSION_ARGS = [
   '-o', 'RemoteCommand=none', '-o', 'ClearAllForwardings=yes',
 ]
 
+/** Apply the same keepalive policy to key/agent and terminal-created masters. */
+function keepaliveArgs() {
+  const option = (name, fallback, min) => {
+    const raw = process.env[name]
+    const value = Number(raw === undefined || raw.trim() === '' ? fallback : raw)
+    if (!Number.isSafeInteger(value) || value < min || value > 2147483647) {
+      throw new Error(`${name} must be an integer between ${min} and 2147483647`)
+    }
+    return value
+  }
+  return [
+    '-o', `ServerAliveInterval=${option('REMOTE_SSH_SERVER_ALIVE_INTERVAL', 30, 0)}`,
+    '-o', `ServerAliveCountMax=${option('REMOTE_SSH_SERVER_ALIVE_COUNT_MAX', 3, 1)}`,
+  ]
+}
+
 /** Create the ControlPath directory once per process (and keep it private). */
 async function ensureControlDir() {
   await mkdir(controlDir(), { recursive: true, mode: 0o700 })
@@ -81,7 +97,7 @@ export async function sshSpawn(opts, command) {
   return {
     command: 'ssh',
     // `--` ends option parsing so a destination can never be read as an option.
-    args: ['-T', ...SESSION_ARGS,
+    args: ['-T', ...SESSION_ARGS, ...keepaliveArgs(),
       '-o', 'SessionType=default', '-o', 'StdinNull=no', '-o', 'ForkAfterAuthentication=no',
       '-o', 'ConnectTimeout=20', '-o', 'LogLevel=ERROR', '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes',
       ...ctl, ...portOptionArgs, '--', target, `sh -c ${shq(script)}`],
@@ -140,6 +156,7 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, onT
     let outBytes = 0
     let errBytes = 0
     let outTotal = 0
+    let errTotal = 0
     let timedOut = false
     let settled = false
     const kill = () => { try { child.kill('SIGKILL') } catch {} }
@@ -169,11 +186,14 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, onT
       outTotal += d.length
       outBytes = keepTail(outChunks, outBytes, d, maxStdout)
     })
-    child.stderr.on('data', (d) => { errBytes = keepTail(errChunks, errBytes, d, maxStderr) })
+    child.stderr.on('data', (d) => {
+      errTotal += d.length
+      errBytes = keepTail(errChunks, errBytes, d, maxStderr)
+    })
     child.on('error', (e) => finish(reject, new Error(`ssh spawn failed: ${e.message}`)))
     child.on('close', (transportCode) => {
       onClose({
-        transportCode, timedOut, outChunks, errChunks, outTotal, outBytes, errBytes,
+        transportCode, timedOut, outChunks, errChunks, outTotal, errTotal, outBytes, errBytes,
         settle: { resolve: (v) => finish(resolve, v), reject: (e) => finish(reject, e) },
       })
     })
@@ -257,11 +277,12 @@ export async function sshRun(opts) {
   // resolve with timedOut:true (sshRun reports timeouts as data).
   return runSshChild(spec, {
     stdin, signal, timeoutMs, maxStdout, maxStderr,
-    onClose: ({ transportCode, timedOut, outChunks, errChunks, settle }) => {
+    onClose: ({ transportCode, timedOut, outChunks, errChunks, outTotal, errTotal, settle }) => {
       let stdout = Buffer.concat(outChunks).toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
+      const truncated = { stdoutTruncated: outTotal > maxStdout, stderrTruncated: errTotal > maxStderr }
       if (timedOut) {
-        return settle.resolve({ code: null, stdout, stderr, timedOut: true })
+        return settle.resolve({ code: null, stdout, stderr, timedOut: true, ...truncated })
       }
       if (transportCode !== 0) {
         return settle.reject(new Error(`ssh transport failed (exit ${transportCode}): ${stderr.trim().split('\n').slice(-3).join('\n')}`))
@@ -272,7 +293,7 @@ export async function sshRun(opts) {
       }
       const code = parseInt(stdout.slice(idx + MARK.length).trim(), 10)
       stdout = stdout.slice(0, idx).replace(/\n$/, '')
-      settle.resolve({ code: Number.isFinite(code) ? code : null, stdout, stderr })
+      settle.resolve({ code: Number.isFinite(code) ? code : null, stdout, stderr, ...truncated })
     },
   })
 }
@@ -531,8 +552,7 @@ export function buildConnectCommand(target) {
     '-o', `ControlPersist=${seconds}`,
     '-o', 'BatchMode=no',
     '-o', 'StrictHostKeyChecking=ask',
-    '-o', 'ServerAliveInterval=30',
-    '-o', 'ServerAliveCountMax=3',
+    ...keepaliveArgs(),
     '-f', '-N',
     ...portArgs(target),
     '--',

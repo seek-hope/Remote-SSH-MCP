@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSudoTerminalScript, runSudoCommand } from '../src/sudo.js'
+import { buildSudoTerminalScript, runSudoCommand, readOutputTail } from '../src/sudo.js'
 import { installFakeSsh, installFakeTerminal } from './helpers.mjs'
+import { writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 const target = { ssh: 'h', name: 'h', port: undefined, controlPersist: 0 }
 
@@ -44,6 +46,21 @@ test('sudo pipes the typed password to sudo stdin and returns the command result
     delete process.env.FAKE_SSH_STDOUT
     await fakeTerm.cleanup()
     await fakeSsh.cleanup()
+  }
+})
+
+test('sudo output is read as a bounded tail with an explicit truncation marker', async () => {
+  const fake = await installFakeSsh()
+  try {
+    const file = join(fake.dir, 'large-output')
+    await writeFile(file, 'x'.repeat(1024 * 1024) + 'TAIL')
+    const output = await readOutputTail(file, 4096)
+    assert.ok(output.startsWith('[output truncated to last 4096 bytes]'))
+    assert.ok(output.endsWith('TAIL'))
+    assert.ok(Buffer.byteLength(output) < 4200)
+    assert.equal(await readOutputTail(join(fake.dir, 'missing')), '')
+  } finally {
+    await fake.cleanup()
   }
 })
 

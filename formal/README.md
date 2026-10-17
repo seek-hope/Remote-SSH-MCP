@@ -67,6 +67,8 @@ npm run verify
 
 `Jobs.tla` 对 `src/jobs.py` 建模：启动、写输出、正常结束、崩溃、kill、记录退出码、读取、清理，以及由存活状态、退出文件、killed 标记派生的状态。
 
+模型中的 `running` 表示 worker 存活。自本次更新起，worker 会保持到进程组内非僵尸成员全部退出，并由 worker 自身在 TERM 宽限期后升级为 KILL（`job_kill` 请求进程中断不影响升级）。因此“仍报告 `running`”涵盖了仍有同组成员存活的运行态；`killed` 只表示 worker 接受了终止标记。实现侧由 `test/jobs.test.mjs` 覆盖同组顽固子进程、shell 先退出与请求进程中途被杀三种情况。
+
 验证的性质：
 
 - `NoCleanupWhileRunning`：进程存活时绝不删除任务目录；
@@ -94,6 +96,7 @@ npm run verify
 
 - 未建模文件系统原语本身（`mkdir`/`rename`/`readFile` 的原子性与错误语义按 POSIX 假设）。
 - 未建模 token 生成、`pid` 存活判定（`process.kill(pid,0)`）、时钟/mtime 粒度；`Warmup.tla` 用非确定动作抽象 30s 失败缓存与跨进程 socket 锁（后者由 `Lock.tla` 单独验证）。
-- `Jobs.tla` 将输出与读取建模为单字节计数，未建模 `offset`/`limit` 的任意随机访问与分页边界。
+- `Jobs.tla` 将输出与读取建模为单字节计数，未建模 `offset`/`limit` 的任意随机访问与分页边界；也未建模 worker 在终止宽限期后的信号升级、进程组枚举与 PID 复用防护。
+- 文件工具的远端完整性校验（`src/files.py`）与连接保活策略未建立独立 TLA+ 模型；前者由临时目录集成测试覆盖，后者由 `ssh -G` 兼容性测试覆盖。
 - `Sudo.tla` 验证的是**设计层面的信息流契约**，不是 bash 与 sudo 实现的证明；实现侧由 `test/sudo.test.mjs` 补充。
 - 模型与代码的对应关系由人工维护，修改协议时需同步模型。

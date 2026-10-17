@@ -97,6 +97,20 @@ export async function installFakeSsh() {
   }
 }
 
+/** Execute the generated remote command locally, only for temp-directory tests. */
+export async function installLocalSsh() {
+  const fake = await installFakeSsh()
+  await writeFile(join(fake.dir, 'ssh'), `#!${process.execPath}
+const fs = require('node:fs')
+const { spawnSync } = require('node:child_process')
+const argv = process.argv.slice(2)
+if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
+const result = spawnSync('sh', ['-c', argv.at(-1)], { stdio: 'inherit' })
+process.exit(result.status ?? 1)
+`, { mode: 0o755 })
+  return fake
+}
+
 /**
  * installFakeTerminal — replaces REMOTE_SSH_TERMINAL with a launcher that runs
  * the generated terminal command and feeds `password` on its stdin, so the
