@@ -76,7 +76,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
     await readyTarget(target, signal)
     return remoteJob(target, { action: 'output', ...args }, signal)
   })
-  register('job_kill', 'Terminate a remote background job process group (TERM, then KILL after 3 seconds if still alive). Detached descendants may escape the group. Output remains available through job_output. The SSH request timeout is 120 seconds, excluding connection preparation; query job_output to check state after a request failure.', z.strictObject(jobFields), async ({ target: name, ...args }, signal) => {
+  register('job_kill', 'Terminate a remote background job process group. The remote worker escalates TERM to SIGKILL after a 3-second grace period, so termination continues even if this request is interrupted. It reaps same-group descendants that ignore TERM; detached sessions or daemons may still escape. killed means the signal was accepted, not that every process is gone. Output remains available through job_output. The SSH request timeout is 120 seconds, excluding connection preparation; query job_output to check state after a request failure.', z.strictObject(jobFields), async ({ target: name, ...args }, signal) => {
     const target = await findTarget(storeFile, name)
     await readyTarget(target, signal)
     return remoteJob(target, { action: 'kill', ...args }, signal)

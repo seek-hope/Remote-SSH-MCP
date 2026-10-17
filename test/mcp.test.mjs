@@ -126,6 +126,7 @@ test('MCP exposes authentication, timeout and job safety guidance in tool metada
   assert.match(byName.job_output.description, /has_more:false.*not that the job ended/)
   assert.match(byName.job_output.description, /check exit_code/)
   for (const name of ['job_output', 'job_kill']) assert.match(byName[name].description, /120 seconds/)
+  assert.match(byName.job_kill.description, /escalates TERM to SIGKILL/)
   assert.match(byName.bash.description, /query it before retrying/)
   assert.match(byName.bash.inputSchema.properties.run_in_background.description, /timeoutMs is ignored/)
   assert.match(byName.sudo.inputSchema.properties.timeoutMs.description, /excludes prior SSH connection preparation and terminal launch/)
