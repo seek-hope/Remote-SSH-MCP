@@ -155,7 +155,10 @@ def main():
     job_id = request['job_id'].lower()
     if not re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}', job_id):
         raise ValueError('Invalid job ID')
-    os.umask(0o077)
+    # Keep job records private while the helper creates them, but restore the
+    # account's umask before starting the worker so the user's command behaves
+    # like a foreground command (the 0700 job directory still protects records).
+    previous_umask = os.umask(0o077)
     root = Path(os.environ.get('REMOTE_SSH_JOB_DIR', str(Path.home() / '.cache' / 'remote-ssh' / 'jobs')))
     job = root / job_id
     if job.is_symlink():
@@ -169,6 +172,7 @@ def main():
             (job / 'request.json').write_text(json.dumps(request), encoding='utf-8')
             # ponytail: logs remain on disk until explicit cleanup; add rotation if long jobs need a disk quota.
             with (job / 'out').open('wb') as output:
+                os.umask(previous_umask)
                 worker = subprocess.Popen([sys.executable, '-c', WORKER, str(job)], stdin=subprocess.DEVNULL,
                                           stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + 10

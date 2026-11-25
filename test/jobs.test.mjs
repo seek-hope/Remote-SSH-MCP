@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, mkdir, stat } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -378,5 +378,24 @@ test('an undecodable /proc comm does not break job bookkeeping', linux, async ()
     })
   } finally {
     bad.kill('SIGKILL')
+  }
+})
+
+test('a background command keeps the account umask', { skip: process.platform !== 'linux' }, async () => {
+  const previous = process.umask(0o022)
+  try {
+    await fixture(async ({ invoke, job_id, dir }) => {
+      assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'touch created' })).status, 'started')
+      let out
+      for (let i = 0; i < 100; i++) {
+        out = await invoke({ action: 'output', job_id, limit: 65536 })
+        if (out.status !== 'running') break
+        await delay(25)
+      }
+      assert.equal(out.status, 'completed')
+      assert.equal((await stat(join(dir, 'created'))).mode & 0o777, 0o644)
+    })
+  } finally {
+    process.umask(previous)
   }
 })
