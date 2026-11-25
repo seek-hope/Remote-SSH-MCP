@@ -323,6 +323,21 @@ test('glob backslash escapes the next character and is not counted by the budget
     const started = Date.now()
     assert.deepEqual(run('\\*a'.repeat(6)), [])
     assert.ok(Date.now() - started < 2000)
+
+    for (const name of ['a,b', 'a}', 'b', '{a{b{c']) await writeFile(join(dir, name), '')
+    assert.deepEqual(run('{a\\,b}'), [join(dir, 'a,b')])
+    assert.deepEqual(run('{a\\},b}'), [join(dir, 'a}'), join(dir, 'b')].sort())
+    // Unmatched braces are literals, not alternations.
+    assert.deepEqual(run('{a{b{c'), [join(dir, '{a{b{c')])
+    let nested
+    try {
+      execFileSync('python3', ['-c', GLOB_PY, '{{a,b}}', dir, '10'], { encoding: 'utf8' })
+    } catch (error) {
+      nested = error
+    }
+    assert.ok(nested)
+    assert.match(String(nested.stderr), /__REMOTE_SSH_ERR__:bad-pattern/)
+    assert.doesNotMatch(String(nested.stderr), /Traceback/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -343,6 +358,18 @@ test('grep skips binary files instead of reporting them as parseable', async () 
     assert.match(remoteCommand(calls.at(-1)), /grep -rHInE -D skip/)
   } finally {
     await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('glob handles many unmatched braces without quadratic scanning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-braces-'))
+  try {
+    const started = Date.now()
+    const out = execFileSync('python3', ['-c', GLOB_PY, '{'.repeat(10000), dir, '10'], { encoding: 'utf8' })
+    assert.match(out, /__REMOTE_SSH_TOTAL__0/)
+    assert.ok(Date.now() - started < 2000, `unmatched braces stay linear (${Date.now() - started}ms)`)
+  } finally {
     await rm(dir, { recursive: true, force: true })
   }
 })

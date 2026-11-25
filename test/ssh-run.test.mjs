@@ -108,14 +108,30 @@ test('sshRun decodes a no-marker tail across the carry boundary', async () => {
   }
 })
 
+test('an out-of-range marker code is not accepted as the exit status', async () => {
+  const fake = await installFakeSsh()
+  try {
+    for (const code of ['999', '1234']) {
+      process.env.FAKE_SSH_MARK = code
+      await assert.rejects(sshRun({ target: 'h', command: 'true', controlPersist: 0 }), /without exit marker/)
+    }
+  } finally {
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+})
+
 test('sshRun never returns more than maxStdout bytes at a UTF-8 boundary', async () => {
   const fake = await installFakeSsh()
   process.env.FAKE_SSH_STDOUT = '😀'.repeat(20)
   process.env.FAKE_SSH_MARK = '0'
   try {
-    const result = await sshRun({ target: 'h', command: 'true', controlPersist: 0, maxStdout: 10 })
-    assert.ok(Buffer.byteLength(result.stdout, 'utf8') <= 10, `byte cap (${Buffer.byteLength(result.stdout)})`)
-    assert.doesNotMatch(result.stdout, /\uFFFD/)
+    for (const maxStdout of [3, 7, 10, 11]) {
+      const result = await sshRun({ target: 'h', command: 'true', controlPersist: 0, maxStdout })
+      assert.ok(Buffer.byteLength(result.stdout, 'utf8') <= maxStdout,
+        `byte cap ${maxStdout} (${Buffer.byteLength(result.stdout)})`)
+      assert.doesNotMatch(result.stdout, /\uFFFD/)
+    }
   } finally {
     delete process.env.FAKE_SSH_STDOUT
     delete process.env.FAKE_SSH_MARK
@@ -144,13 +160,17 @@ test('a complete marker is honored even when ssh exits non-zero afterwards', asy
   const fake = await installFakeSsh()
   process.env.FAKE_SSH_MARK = '0'
   process.env.FAKE_SSH_EXIT = '255'
+  process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
+  setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
   try {
     const result = await sshRun({ target: 'h', command: 'true', controlPersist: 0 })
     assert.equal(result.code, 0)
     assert.equal(result.timedOut, false)
+    assert.equal(sudoCacheSize(), 1, 'a completed remote command is not a host-key failure')
   } finally {
     delete process.env.FAKE_SSH_MARK
     delete process.env.FAKE_SSH_EXIT
+    delete process.env.FAKE_SSH_STDERR
     await fake.cleanup()
   }
 })

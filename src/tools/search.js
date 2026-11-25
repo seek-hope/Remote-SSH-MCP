@@ -25,12 +25,40 @@ import heapq, os, re, stat, sys
 
 pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
+def find_unescaped(pat, start, target):
+    k = start
+    while k < len(pat):
+        if pat[k] == '\\' and k + 1 < len(pat):
+            k += 2
+            continue
+        if pat[k] == target:
+            return k
+        k += 1
+    return -1
+
+def split_unescaped(body):
+    parts, cur, k = [], [], 0
+    while k < len(body):
+        c = body[k]
+        if c == '\\' and k + 1 < len(body):
+            cur.append(body[k:k + 2]); k += 2
+            continue
+        if c == ',':
+            parts.append(''.join(cur)); cur = []; k += 1
+            continue
+        if c == '{':
+            raise re.error('nested brace groups are not supported')
+        cur.append(c); k += 1
+    parts.append(''.join(cur))
+    return parts
+
 # Ambiguous wildcard groups cause exponential backtracking on long paths.
 # Count wildcards outside bracket classes, and count ** only once rather than
 # as two stars, so the documented budget is not stricter than it claims.
 def wildcard_budget(pat):
     globstars = stars = questions = braces = 0
     classes_exhausted = False
+    braces_exhausted = False
     i = 0
     while i < len(pat):
         c = pat[i]
@@ -65,8 +93,14 @@ def wildcard_budget(pat):
             stars += 1
         elif c == '?':
             questions += 1
-        elif c == '{':
-            braces += 1
+        elif c == '{' and not braces_exhausted:
+            # Only a brace with an unescaped closer is an alternation.
+            if find_unescaped(pat, i + 1, '}') == -1:
+                braces_exhausted = True
+            else:
+                braces += 1
+                if braces > 2:
+                    return globstars, stars + questions, braces
         i += 1
     return globstars, stars + questions, braces
 
@@ -156,6 +190,7 @@ if not stat.S_ISDIR(root_stat.st_mode):
 def translate(pat):
     out, i, n = [], 0, len(pat)
     classes_exhausted = False
+    braces_exhausted = False
     while i < n:
         c = pat[i]
         if c == '\\' and i + 1 < n:
@@ -173,12 +208,15 @@ def translate(pat):
                 out.append('[^/]*'); i += 1
         elif c == '?':
             out.append('[^/]'); i += 1
-        elif c == '{':
-            j = pat.find('}', i)
+        elif c == '{' and not braces_exhausted:
+            j = find_unescaped(pat, i + 1, '}')
             if j == -1:
+                # No later '{' can close either; treat the rest as literals
+                # without rescanning to the end for every '{'.
+                braces_exhausted = True
                 out.append(re.escape(c)); i += 1
             else:
-                alts = [translate(p) for p in pat[i + 1:j].split(',')]
+                alts = [translate(p) for p in split_unescaped(pat[i + 1:j])]
                 out.append('(?:' + '|'.join(alts) + ')'); i = j + 1
         elif c == '[' and not classes_exhausted:
             # POSIX allows ']' as the first class member ([]] matches ']'),
@@ -266,7 +304,7 @@ sys.stdout.buffer.flush()
 export function makeGlobTool(target, cwd = target.root) {
   return defTextTool({
     name: 'glob',
-    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in newest-modification-first order, up to ${GLOB_CAP} paths. Patterns may contain at most one ** segment, four * or ? wildcards, and two { alternations. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/.svn/.hg/node_modules directories are skipped.`,
+    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in newest-modification-first order, up to ${GLOB_CAP} paths. Patterns may contain at most one ** segment, four * or ? wildcards, and two { alternations. A backslash escapes the next character (\\* matches a literal *, \\\\ a backslash); escaped characters do not count toward the budget. Unmatched { is literal and nested braces are rejected. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/.svn/.hg/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {

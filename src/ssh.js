@@ -437,7 +437,7 @@ export async function sshExec(opts) {
         // problem. Scan the head as well as the tail so a stderr flood after
         // the host-key line does not hide it.
         const hostKey = transportCode === 255 && HOST_KEY_RE.test(`${stderrHead}\n${stderr}`)
-        if (transportCode === 255) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
+        if (hostKey) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
         const tail = hostKey ? 'host key verification failed' : stderr.trim().split('\n').slice(-5).join('\n')
         return settle.reject(new Error(`remote command failed (exit ${transportCode}): ${tail || '(no stderr)'}`))
       }
@@ -535,10 +535,15 @@ export async function sshRun(opts) {
       if (settled) return
       // Decode once: a multi-byte character may straddle the outChunks/carry
       // boundary, and decoding the halves separately would corrupt it.
-      const stdout = Buffer.concat([...outChunks, carry]).toString('utf8')
+      const totalOutput = outTotal + (markerCode === undefined ? carry.length : 0)
+      let outBuf = Buffer.concat([...outChunks, carry])
+      if (totalOutput > maxStdout) {
+        // The retained tail may start inside a multi-byte character.
+        while (outBuf.length > 0 && (outBuf[0] & 0xc0) === 0x80) outBuf = outBuf.subarray(1)
+      }
+      const stdout = outBuf.toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
-      const totalOutput = outTotal + (markerCode === undefined ? carry.length : 0)
       const capTail = (text) => {
         const bytes = Buffer.from(text, 'utf8')
         if (bytes.length <= maxStdout) return text
@@ -562,9 +567,11 @@ export async function sshRun(opts) {
       }
       if (transportCode !== 0) {
         // Only ssh's own 255 is a client/transport failure; a remote command's
-        // nonzero exit or its own stderr phrase is not a host-key problem.
-        const hostKey = transportCode === 255 && HOST_KEY_RE.test(`${stderrHead}\n${stderr}`)
-        if (transportCode === 255) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
+        // nonzero exit or its own stderr phrase is not a host-key problem. A
+        // complete marker means the exit status came from the remote command.
+        const hostKey = transportCode === 255 && markerCode === undefined
+          && HOST_KEY_RE.test(`${stderrHead}\n${stderr}`)
+        if (hostKey) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
         if (markerCode !== undefined) {
           // The wrapper already reported the command's exit; a late transport
           // failure must not turn a completed command into an error.
