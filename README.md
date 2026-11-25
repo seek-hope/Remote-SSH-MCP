@@ -282,7 +282,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 结果包含 `status`、`exit_code`、`output`、`next_offset` 与 `has_more`，输出合并 stdout 与 stderr。`offset` 是从 0 开始的字节偏移，不是行号；`limit` 以字节计，最小 4（足以容纳一个完整 4 字节 UTF-8 字符），默认及上限均为 65536；若 `running`/`lost` 任务的末尾只有 1–3 字节的不完整字符，`next_offset` 可能暂时不前进，直到有更多输出。将 `next_offset` 作为下一次调用的 `offset` 可无重复地继续读取；跨页的多字节 UTF-8 字符会留到下一页，不会被替换成 U+FFFD。`has_more: false` 只表示当前没有更多输出，并不表示任务已经结束，应同时检查 `status` 和 `exit_code`。
 
-后台模式忽略 `bash.timeoutMs`，任务本身没有运行时限；启动、查询与终止任务的 SSH 请求超时均为 120 秒，不包含前置连接准备。后台命令使用远端账户的 umask（与前台 `bash` 一致）；任务目录权限 `0700`，`request.json`、`out` 由 helper 创建，其余任务记录由 worker 创建，均为 `0600`。如果启动失败信息中包含 `job_id`，应先查询该 ID，避免重复启动。
+后台模式忽略 `bash.timeoutMs`，任务本身没有运行时限；启动、查询与终止任务的 SSH 请求超时均为 120 秒，不包含前置连接准备。后台命令使用远端账户的 umask（与前台 `bash` 一致）；任务目录权限 `0700`，`request.json`、`out` 由 helper 创建，其余记录（包括 `killed` 标记）由 helper 或 worker 创建，均为 `0600`。如果启动失败信息中包含 `job_id`，应先查询该 ID，避免重复启动。
 
 `job_kill` 使用相同的 `target` 与 `job_id`，向任务进程组发送 SIGTERM，并在 3 秒宽限期后由任务 worker 升级为 SIGKILL。升级由远端 worker 自己执行：即使 `job_kill` 的 SSH 请求在宽限期内断开或取消，终止仍会继续。命中范围是任务进程组以及同一会话内的成员，而不只是直接 shell；`set -m` 创建的新进程组、忽略 SIGTERM 的子进程也会被清理。worker 会等到组内非僵尸成员全部退出，并连续两次扫描确认为空后才完成，因此任务在仍有存活子进程时不会报告为已结束。若 worker 自身被暂停且无法运行，结果会保持 `running`；对 v3 worker，`killed` 表示 worker 接受终止并完成了收尾（确认成员已停止），若 worker 在收尾前死亡，状态为 `lost` 而不是 `killed`。主动创建新会话或守护进程的子进程仍可能脱离。输出仍可通过 `job_output` 读取；`job_kill` 的响应也包含第一块输出（offset 0，最多 65536 字节）。
 

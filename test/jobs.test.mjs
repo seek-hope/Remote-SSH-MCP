@@ -10,6 +10,8 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 import { shq } from '../src/ssh.js'
+import { makeBashTool, remoteJob } from '../src/tools/bash.js'
+import { installLocalSsh } from './helpers.mjs'
 
 const exec = promisify(execFile)
 const script = fileURLToPath(new URL('../src/jobs.py', import.meta.url))
@@ -449,20 +451,30 @@ test('a background command sources BASH_ENV exactly once', { skip: process.platf
   }
 })
 
-test('a background command inherits the account environment, not PYTHONUTF8', { skip: process.platform !== 'linux' }, async () => {
-  const expected = (await exec('python3', ['-c', 'import sys; print(sys.flags.utf8_mode)'])).stdout.trim()
-  await fixture(async ({ invoke, job_id, dir }) => {
-    assert.equal((await invoke({
-      action: 'start', job_id, workdir: dir,
-      command: 'python3 -c "import sys; print(sys.flags.utf8_mode)"',
-    })).status, 'started')
+test('the background tool does not leak PYTHONUTF8 into the command', { skip: process.platform !== 'linux' }, async () => {
+  const previous = process.env.PYTHONUTF8
+  delete process.env.PYTHONUTF8
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-env-tool-'))
+  const target = { ssh: 'h', name: 'h', root: dir, controlPersist: 0 }
+  try {
+    const bash = makeBashTool(target)
+    const command = 'python3 -c "import os; print(os.environ.get(\'PYTHONUTF8\', \'unset\'))"'
+    const foreground = await bash.execute({ command }, {})
+    assert.match(foreground, /^unset\n/)
+    const started = JSON.parse(await bash.execute({ command, run_in_background: true }, {}))
     let out
     for (let i = 0; i < 100; i++) {
-      out = await invoke({ action: 'output', job_id, limit: 65536 })
+      out = await remoteJob(target, { action: 'output', job_id: started.job_id, limit: 65536 }, new AbortController().signal)
       if (out.status !== 'running') break
       await delay(25)
     }
     assert.equal(out.status, 'completed')
-    assert.equal(out.output.trim(), expected)
-  })
+    assert.equal(out.output.trim(), 'unset')
+  } finally {
+    if (previous === undefined) delete process.env.PYTHONUTF8
+    else process.env.PYTHONUTF8 = previous
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
 })
