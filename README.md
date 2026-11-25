@@ -309,7 +309,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | 变量 | 默认值 / 用途 |
 | --- | --- |
 | `REMOTE_SSH_TARGETS_FILE` | `~/.config/remote-ssh/targets.json`；`--targets` 优先 |
-| `REMOTE_SSH_CONTROL_DIR` | `~/.cache/remote-ssh/control`；目录权限 `0700` |
+| `REMOTE_SSH_CONTROL_DIR` | `~/.cache/remote-ssh/control`；目录权限 `0700`；路径不得包含空白、引号、反斜杠、`#` 或 `%`（OpenSSH `-o` 解析限制） |
 | `REMOTE_SSH_TERMINAL` | 终端启动命令；默认自动探测 |
 | `REMOTE_SSH_SUDO_CACHE_MS` | `1200000`（20 分钟）；sudo 密码在内存中的保留时间，`0` 关闭缓存；超过约 24.8 天时只有惰性清零 |
 | `REMOTE_SSH_CONNECT_TIMEOUT_MS` | `150000`；终端认证等待时间；正整数会夹取到 1000–150000 毫秒，非整数、`0`、负数或无效值回退到 `150000` |
@@ -319,7 +319,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | `REMOTE_SSH_LOCK_GRACE_MS` | `5000`；空锁被判定为过期前的宽限时间 |
 | `REMOTE_SSH_LOCK_RETRY_MS` | `50`；配置锁重试间隔 |
 
-SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`）。服务本身不转发环境变量；除非另行配置 ssh `SendEnv` 与 sshd `AcceptEnv`，在 MCP 进程环境中设置不会传到远端。
+SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径；该路径会作为 OpenSSH `-o ControlPath=` 的值重新解析，因此不能包含空白、引号、反斜杠、`#` 或 `%`。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`）。服务本身不转发环境变量；除非另行配置 ssh `SendEnv` 与 sshd `AcceptEnv`，在 MCP 进程环境中设置不会传到远端。
 
 ## 测试
 

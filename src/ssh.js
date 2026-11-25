@@ -20,7 +20,15 @@ import { withStoreLock } from './store.js'
 
 
 /** ControlMaster socket directory (0700 — OpenSSH rejects a shared dir). */
-const controlDir = () => resolve(process.env.REMOTE_SSH_CONTROL_DIR || join(homedir(), '.cache', 'remote-ssh', 'control'))
+const controlDir = () => {
+  const dir = resolve(process.env.REMOTE_SSH_CONTROL_DIR || join(homedir(), '.cache', 'remote-ssh', 'control'))
+  // OpenSSH reparses -o values: whitespace splits, quotes/backslashes change
+  // parsing, # starts a comment, and % starts a token expansion.
+  if (/[\s"'\\#%]/.test(dir)) {
+    throw new Error('REMOTE_SSH_CONTROL_DIR must not contain whitespace, quotes, backslash, # or % (OpenSSH -o parsing)')
+  }
+  return dir
+}
 
 /** In-flight ControlMaster warm-ups, one per ssh destination. */
 const masterWarmers = new Map()
@@ -192,10 +200,21 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
  */
 function decodeTail(chunks, total, cap) {
   let buf = Buffer.concat(chunks)
-  if (total > cap) {
+  let truncated = total > cap
+  if (truncated) {
     while (buf.length > 0 && (buf[0] & 0xc0) === 0x80) buf = buf.subarray(1)
   }
-  return buf.toString('utf8')
+  let text = buf.toString('utf8')
+  // Invalid bytes decode to 3-byte U+FFFD; re-cap the decoded text so the
+  // returned string still respects the byte budget.
+  let bytes = Buffer.from(text, 'utf8')
+  if (bytes.length > cap) {
+    truncated = true
+    let start = bytes.length - cap
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1
+    text = bytes.subarray(start).toString('utf8')
+  }
+  return { text, truncated }
 }
 
 /**
@@ -441,7 +460,7 @@ export async function sshExec(opts) {
       // A timeout/abort already settled the promise; the late close must not
       // clear the sudo cache based on whatever stderr was collected.
       if (timedOut || settled) return
-      const stderr = decodeTail(errChunks, errTotal, maxStderr)
+      const stderr = decodeTail(errChunks, errTotal, maxStderr).text
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
       if (transportCode !== 0) {
         // Only ssh's own 255 is a client/transport failure. A remote command
@@ -554,8 +573,10 @@ export async function sshRun(opts) {
         while (outBuf.length > 0 && (outBuf[0] & 0xc0) === 0x80) outBuf = outBuf.subarray(1)
       }
       const stdout = outBuf.toString('utf8')
-      const stderr = decodeTail(errChunks, errTotal, maxStderr)
+      const stderrInfo = decodeTail(errChunks, errTotal, maxStderr)
+      const stderr = stderrInfo.text
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
+      const stdoutBytes = Buffer.byteLength(stdout, 'utf8')
       const capTail = (text) => {
         const bytes = Buffer.from(text, 'utf8')
         if (bytes.length <= maxStdout) return text
@@ -568,8 +589,8 @@ export async function sshRun(opts) {
       let commandOutput = capTail(stdout)
       if (markerCode !== undefined) commandOutput = commandOutput.replace(/\n$/, '')
       const truncated = {
-        stdoutTruncated: totalOutput > maxStdout,
-        stderrTruncated: errTotal > maxStderr,
+        stdoutTruncated: totalOutput > maxStdout || stdoutBytes > maxStdout,
+        stderrTruncated: errTotal > maxStderr || stderrInfo.truncated,
       }
       if (timedOut) {
         if (markerCode !== undefined) {

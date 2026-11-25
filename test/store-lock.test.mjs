@@ -18,7 +18,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile, stat } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile, stat, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withStoreLock, readTargetStoreStrict as readTargetStore, saveTargetStore, _lockTestHooks } from '../src/store.js'
@@ -666,6 +666,30 @@ test('a zombie lock owner is treated as dead and recovered', { skip: process.pla
     assert.ok(Date.now() - started < 2500, `the lock was recovered without waiting for the timeout (${Date.now() - started}ms)`)
   } finally {
     py.kill('SIGKILL')
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an unreadable live lock owner is never treated as stale', { skip: process.platform !== 'linux' || process.getuid?.() === 0 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-unreadable-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  const owner = join(lock, 'owner')
+  try {
+    await mkdir(lock)
+    await writeFile(owner, JSON.stringify({ token: 'live', pid: process.pid, at: new Date().toISOString() }))
+    await chmod(owner, 0)
+    const old = new Date(Date.now() - 60_000)
+    await utimes(lock, old, old)
+    await assert.rejects(
+      withStoreLock(file, async () => 'x', { timeoutMs: 300, graceMs: 1000, retryMs: 10 }),
+      /timed out/,
+    )
+    await chmod(owner, 0o644)
+    const rec = JSON.parse(await readFile(owner, 'utf8'))
+    assert.equal(rec.token, 'live', 'the live owner was not moved aside')
+  } finally {
+    await chmod(owner, 0o644).catch(() => {})
     await rm(dir, { recursive: true, force: true })
   }
 })

@@ -324,11 +324,14 @@ export function makeGlobTool(target, cwd = target.root) {
       })
       if (r.timedOut) throw new Error(`glob: search timed out on ${target.name}`)
       if (r.code !== 0) {
-        if (r.stderr.includes('__REMOTE_SSH_ERR__:no-such-dir')) throw new Error(`glob: no such directory on ${target.name}: ${root}`)
-        if (r.stderr.includes('__REMOTE_SSH_ERR__:not-a-dir')) throw new Error(`glob: not a directory on ${target.name}: ${root}`)
-        if (r.stderr.includes('__REMOTE_SSH_ERR__:permission')) throw new Error(`glob: permission denied on ${target.name}: ${root}`)
-        if (r.stderr.includes('__REMOTE_SSH_ERR__:bad-pattern')) throw new Error(`glob: invalid pattern: ${a.pattern}`)
-        if (r.stderr.includes('__REMOTE_SSH_ERR__:too-complex')) throw new Error('glob: pattern is too complex (at most one **, four other * or ? wildcards, two { alternations; class literals do not count); simplify it or use grep')
+        // Sentinels are standalone lines; an error path containing the text
+        // must not be misclassified.
+        const sentinel = (name) => new RegExp(`^__REMOTE_SSH_ERR__:${name}\\r?$`, 'm').test(r.stderr)
+        if (sentinel('no-such-dir')) throw new Error(`glob: no such directory on ${target.name}: ${root}`)
+        if (sentinel('not-a-dir')) throw new Error(`glob: not a directory on ${target.name}: ${root}`)
+        if (sentinel('permission')) throw new Error(`glob: permission denied on ${target.name}: ${root}`)
+        if (sentinel('bad-pattern')) throw new Error(`glob: invalid pattern: ${a.pattern}`)
+        if (sentinel('too-complex')) throw new Error('glob: pattern is too complex (at most one **, four other * or ? wildcards, two { alternations; class literals do not count); simplify it or use grep')
         throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       }
       if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')

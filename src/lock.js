@@ -170,11 +170,34 @@ async function writeOwnerRecord(lockPath, token) {
  * version).
  */
 async function readOwnerRecord(lockPath) {
+  let raw
   try {
-    const rec = JSON.parse(await readFile(ownerPathFor(lockPath), 'utf8'))
+    raw = await readFile(ownerPathFor(lockPath), 'utf8')
+  } catch (e) {
+    // Missing/not-a-directory is an absent record (a husk). Any other error
+    // (EACCES/EIO/EMFILE, ...) is UNKNOWN: callers must not treat it as dead.
+    if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return undefined
+    throw e
+  }
+  try {
+    const rec = JSON.parse(raw)
     if (rec && typeof rec.token === 'string' && rec.token.length > 0) return rec
-  } catch { /* fall through */ }
+  } catch { /* invalid JSON is an ownerless husk */ }
   return undefined
+}
+
+/** Read with a few retries for transient I/O errors; rethrows if still unknown. */
+async function readOwnerRecordRetry(lockPath, attempts = 4) {
+  let last
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await readOwnerRecord(lockPath)
+    } catch (e) {
+      last = e
+      await sleep(20)
+    }
+  }
+  throw last
 }
 
 /**
@@ -187,7 +210,13 @@ async function readOwnerRecord(lockPath) {
  *              dead, or no valid record and older than graceMs.
  */
 async function judgeLock(lockPath, graceMs) {
-  const rec = await readOwnerRecord(lockPath)
+  let rec
+  try {
+    rec = await readOwnerRecord(lockPath)
+  } catch {
+    // A transient read error proves nothing about liveness: never steal.
+    return 'held'
+  }
   if (rec !== undefined) {
     return Number.isInteger(rec.pid) && pidAlive(rec.pid) ? 'held' : 'stale'
   }
@@ -211,7 +240,12 @@ async function judgeLock(lockPath, graceMs) {
  * ownerless husk past its grace.
  */
 async function gateLive(gatePath) {
-  const g = await readOwnerRecord(gatePath)
+  let g
+  try {
+    g = await readOwnerRecord(gatePath)
+  } catch {
+    return true // unknown: treat as live, never take over
+  }
   if (g !== undefined) return Number.isInteger(g.pid) && pidAlive(g.pid)
   try {
     return Math.abs(Date.now() - (await stat(gatePath)).mtimeMs) <= GATE_STALE_MS
@@ -276,12 +310,20 @@ async function enterGate(gatePath, token) {
  * (never delete a successor's gate).
  */
 async function releaseGate(gatePath, token) {
-  try {
-    const g = await readOwnerRecord(gatePath)
-    if (g?.token === token) {
+  // Retry transient read/rm errors: a live-pid gate is never taken over.
+  let last
+  for (let i = 0; i < 5; i++) {
+    try {
+      const g = await readOwnerRecord(gatePath)
+      if (g?.token !== token) return // gone or a successor's gate
       await rm(gatePath, { recursive: true, force: true })
+      return
+    } catch (e) {
+      last = e
+      await sleep(20)
     }
-  } catch { /* best effort: takeover rules cover a leaked gate */ }
+  }
+  throw last
 }
 
 /**
@@ -371,7 +413,12 @@ async function acquireStoreLock(file, opts) {
         }
       }
       if (created) {
-        const rec = await readOwnerRecord(lockPath)
+        let rec
+        try {
+          rec = await readOwnerRecordRetry(lockPath)
+        } catch {
+          rec = undefined
+        }
         if (rec?.token === token) {
           // A gate that appeared around our publish may hold a verdict taken
           // BEFORE our owner record landed; wait it out, then re-confirm our
@@ -387,7 +434,12 @@ async function acquireStoreLock(file, opts) {
             }
             await sleep(opts.retryMs)
           }
-          const confirmed = await readOwnerRecord(lockPath)
+          let confirmed
+          try {
+            confirmed = await readOwnerRecordRetry(lockPath)
+          } catch {
+            confirmed = undefined
+          }
           if (confirmed?.token === token) return { lockPath, token }
         }
         // We published but could not confirm ownership (a transient read error
@@ -411,12 +463,21 @@ async function acquireStoreLock(file, opts) {
  */
 async function releaseStoreLock(handle) {
   if (handle === undefined) return
-  try {
-    const rec = await readOwnerRecord(handle.lockPath)
-    if (rec?.token === handle.token) {
+  // Retry transient read/rm errors: leaving a live-pid lock behind would make
+  // every later acquisition wait out its timeout (live owners are never stolen).
+  let last
+  for (let i = 0; i < 5; i++) {
+    try {
+      const rec = await readOwnerRecord(handle.lockPath)
+      if (rec?.token !== handle.token) return // gone or a successor's lock
       await rm(handle.lockPath, { recursive: true, force: true })
+      return
+    } catch (e) {
+      last = e
+      await sleep(20)
     }
-  } catch { /* best effort: stale recovery covers a leaked lock */ }
+  }
+  throw last
 }
 
 /**

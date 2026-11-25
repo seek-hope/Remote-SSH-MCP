@@ -133,6 +133,35 @@ test('sshRun never returns more than maxStderr bytes at a UTF-8 boundary', async
     assert.ok(Buffer.byteLength(result.stderr, 'utf8') <= 64 * 1024,
       `stderr byte cap (${Buffer.byteLength(result.stderr)})`)
     assert.doesNotMatch(result.stderr.slice(0, 1), /\uFFFD/)
+
+    // Invalid bytes decode to U+FFFD (3 bytes); the decoded text must still
+    // respect the byte cap and be flagged as truncated.
+    const invalid = await sshRun({
+      target: 'h',
+      command: 'python3 -c \'import sys; sys.stderr.buffer.write(b"a"*65536+b"b"+b"\\x80"*65535)\'',
+      controlPersist: 0,
+    })
+    assert.equal(invalid.stderrTruncated, true)
+    assert.ok(Buffer.byteLength(invalid.stderr, 'utf8') <= 64 * 1024,
+      `invalid stderr byte cap (${Buffer.byteLength(invalid.stderr)})`)
+  } finally {
+    await ssh.cleanup()
+  }
+})
+
+test('stdout truncated by U+FFFD expansion is flagged and capped', async () => {
+  const ssh = await installLocalSsh()
+  try {
+    const result = await sshRun({
+      target: 'h',
+      command: 'python3 -c \'import sys; sys.stdout.buffer.write(b"HELLO_WORLD"+b"\\x80"*(1024-11))\'',
+      controlPersist: 0,
+      maxStdout: 1024,
+    })
+    assert.equal(result.stdoutTruncated, true)
+    assert.ok(Buffer.byteLength(result.stdout, 'utf8') <= 1024,
+      `decoded stdout byte cap (${Buffer.byteLength(result.stdout)})`)
+    assert.doesNotMatch(result.stdout, /HELLO_WORLD/)
   } finally {
     await ssh.cleanup()
   }
@@ -333,6 +362,20 @@ test('a host-key phrase in the stderr head is found despite a stderr flood', asy
     delete process.env.FAKE_SSH_BIG_ERR
     delete process.env.FAKE_SSH_EXIT
     await fake.cleanup()
+  }
+})
+
+test('an unsafe control directory is rejected before spawning ssh', async () => {
+  const previous = process.env.REMOTE_SSH_CONTROL_DIR
+  process.env.REMOTE_SSH_CONTROL_DIR = '/tmp/remote ssh control'
+  try {
+    await assert.rejects(
+      sshSpawn({ target: 'h', controlPersist: 43200 }, 'true'),
+      /REMOTE_SSH_CONTROL_DIR/,
+    )
+  } finally {
+    if (previous === undefined) delete process.env.REMOTE_SSH_CONTROL_DIR
+    else process.env.REMOTE_SSH_CONTROL_DIR = previous
   }
 })
 

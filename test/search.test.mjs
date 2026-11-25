@@ -307,6 +307,25 @@ test('glob cap header does not blame non-UTF-8 names for the item cap', async ()
   }
 })
 
+test('glob does not mistake an error path for a sentinel line', { skip: typeof process.getuid === 'function' && process.getuid() === 0 }, async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-sentinel-'))
+  const locked = join(dir, '__REMOTE_SSH_ERR__:bad-pattern')
+  try {
+    await mkdir(locked)
+    await chmod(locked, 0)
+    await assert.rejects(makeGlobTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir).execute({ pattern: '*.txt' }, exec), (error) => {
+      assert.match(error.message, /Permission denied/)
+      assert.doesNotMatch(error.message, /invalid pattern/)
+      return true
+    })
+  } finally {
+    await chmod(locked, 0o755).catch(() => {})
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('glob backslash escapes the next character and is not counted by the budget', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-escape-'))
   try {
