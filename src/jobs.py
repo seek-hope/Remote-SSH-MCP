@@ -182,7 +182,7 @@ def main():
                 # Keep 077 for the worker's records; pass the account umask so
                 # only the user's command runs with it.
                 worker = subprocess.Popen(
-                    [sys.executable, '-c', WORKER, str(job), str(previous_umask)],
+                    [sys.executable, '-I', '-X', 'utf8', '-c', WORKER, str(job), str(previous_umask)],
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
                 )
             deadline = time.monotonic() + 10

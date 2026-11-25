@@ -10,7 +10,7 @@ const JOB_SCRIPT = readFileSync(new URL('../jobs.py', import.meta.url), 'utf8')
 export async function remoteJob(target, request, signal) {
   const output = await sshExec({
     target: target.ssh, port: target.port, controlPersist: target.controlPersist,
-    command: `PYTHONUTF8=1 python3 -c ${shq(JOB_SCRIPT)}`,
+    command: `python3 -I -X utf8 -c ${shq(JOB_SCRIPT)}`,
     stdin: JSON.stringify(request), signal, timeoutMs: 120_000,
   })
   return JSON.parse(output.toString('utf8'))

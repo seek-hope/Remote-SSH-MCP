@@ -448,3 +448,21 @@ test('a background command sources BASH_ENV exactly once', { skip: process.platf
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a background command inherits the account environment, not PYTHONUTF8', { skip: process.platform !== 'linux' }, async () => {
+  const expected = (await exec('python3', ['-c', 'import sys; print(sys.flags.utf8_mode)'])).stdout.trim()
+  await fixture(async ({ invoke, job_id, dir }) => {
+    assert.equal((await invoke({
+      action: 'start', job_id, workdir: dir,
+      command: 'python3 -c "import sys; print(sys.flags.utf8_mode)"',
+    })).status, 'started')
+    let out
+    for (let i = 0; i < 100; i++) {
+      out = await invoke({ action: 'output', job_id, limit: 65536 })
+      if (out.status !== 'running') break
+      await delay(25)
+    }
+    assert.equal(out.status, 'completed')
+    assert.equal(out.output.trim(), expected)
+  })
+})

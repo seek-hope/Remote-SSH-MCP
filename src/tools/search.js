@@ -319,7 +319,7 @@ export function makeGlobTool(target, cwd = target.root) {
       const r = await sshRun({
         target: target.ssh, port: target.port,
         controlPersist: target.controlPersist,
-        command: `PYTHONUTF8=1 python3 -c ${shq(GLOB_PY)} ${shq(a.pattern)} ${shq(root)} ${GLOB_CAP}`,
+        command: `python3 -I -X utf8 -c ${shq(GLOB_PY)} ${shq(a.pattern)} ${shq(root)} ${GLOB_CAP}`,
         signal: exec.signal,
       })
       if (r.timedOut) throw new Error(`glob: search timed out on ${target.name}`)
