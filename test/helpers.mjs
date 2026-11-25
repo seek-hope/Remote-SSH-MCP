@@ -19,6 +19,22 @@ const FAKE_SSH = `#!/usr/bin/env node
 const fs = require('node:fs')
 const argv = process.argv.slice(2)
 if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
+// resolveSshIdentity timeout tests: emit a complete (hold) or partial
+// (partial) -G answer, then keep the pipe open past the caller's deadline.
+if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE) {
+  const mode = process.env.FAKE_SSH_G_MODE
+  fs.writeSync(1, mode === 'partial'
+    ? 'user testuser\\nhostname foo\\n'
+    : 'hostname h\\nuser testuser\\nport 22\\n')
+  if (mode === 'partial') {
+    // Block without timers or CPU until the resolver's SIGKILL.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
+  } else {
+    const holder = require('node:child_process').spawn('sleep', ['2'], { stdio: ['ignore', 'inherit', 'ignore'] })
+    holder.unref()
+    setTimeout(() => process.exit(0), 0)
+  }
+}
 const outer = argv.at(-1) || ''
 const encoded = outer.match(/printf %s ([A-Za-z0-9+/=]+) \\| base64 -d/)
 const wrapped = encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : outer

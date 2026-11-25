@@ -21,9 +21,29 @@ const MAX_GREP_LINE_CHARS = 8 * 1024
  * `{a,b}` alternation supported. .git/.svn/.hg are skipped.
  */
 export const GLOB_PY = String.raw`
-import heapq, os, re, sys
+import heapq, os, re, stat, sys
 
 pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+# Distinguish a missing root from an existing file and from an inaccessible
+# one; a shell [ -d ] check collapses all three into "no such directory".
+try:
+    root_stat = os.stat(root)
+except FileNotFoundError:
+    sys.stderr.write('__REMOTE_SSH_ERR__:no-such-dir\n')
+    sys.exit(2)
+except NotADirectoryError:
+    sys.stderr.write('__REMOTE_SSH_ERR__:not-a-dir\n')
+    sys.exit(2)
+except PermissionError:
+    sys.stderr.write('__REMOTE_SSH_ERR__:permission\n')
+    sys.exit(2)
+except OSError as error:
+    sys.stderr.write('glob: %s\n' % error)
+    sys.exit(2)
+if not stat.S_ISDIR(root_stat.st_mode):
+    sys.stderr.write('__REMOTE_SSH_ERR__:not-a-dir\n')
+    sys.exit(2)
 
 def translate(pat):
     out, i, n = [], 0, len(pat)
@@ -125,12 +145,14 @@ export function makeGlobTool(target, cwd = target.root) {
       const r = await sshRun({
         target: target.ssh, port: target.port,
         controlPersist: target.controlPersist,
-        command: `if [ ! -d ${shq(root)} ]; then echo "__REMOTE_SSH_ERR__:no-such-dir" >&2; exit 2; fi\nPYTHONUTF8=1 python3 -c ${shq(GLOB_PY)} ${shq(a.pattern)} ${shq(root)} ${GLOB_CAP}`,
+        command: `PYTHONUTF8=1 python3 -c ${shq(GLOB_PY)} ${shq(a.pattern)} ${shq(root)} ${GLOB_CAP}`,
         signal: exec.signal,
       })
       if (r.timedOut) throw new Error(`glob: search timed out on ${target.name}`)
       if (r.code !== 0) {
         if (r.stderr.includes('__REMOTE_SSH_ERR__:no-such-dir')) throw new Error(`glob: no such directory on ${target.name}: ${root}`)
+        if (r.stderr.includes('__REMOTE_SSH_ERR__:not-a-dir')) throw new Error(`glob: not a directory on ${target.name}: ${root}`)
+        if (r.stderr.includes('__REMOTE_SSH_ERR__:permission')) throw new Error(`glob: permission denied on ${target.name}: ${root}`)
         throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       }
       if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')

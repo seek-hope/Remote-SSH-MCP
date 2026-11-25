@@ -7,7 +7,7 @@ import { buildSudoPromptScript, runSudoCommand } from '../src/sudo.js'
 import { makeSudoTool } from '../src/tools/sudo.js'
 import {
   clearAllSudoPasswords,
-  getCachedSudoPassword,
+  getCachedSudoPasswordEntry,
   setCachedSudoPassword,
   sudoCacheKey,
   sudoCacheSize,
@@ -93,9 +93,9 @@ test('a password entered once is reused from memory without another prompt', asy
     assert.equal(first.ok, true, JSON.stringify(first))
     assert.equal(first.stdout, 'root')
     assert.equal((await h.term.readLog()).length, 1)
-    const cached = getCachedSudoPassword(key)
-    assert.equal(cached?.toString(), 'fakepw')
-    cached?.fill(0)
+    const cached = getCachedSudoPasswordEntry(key, { identity: await resolveSshIdentity(target) })
+    assert.equal(cached?.password.toString(), 'fakepw')
+    cached?.password.fill(0)
 
     const second = await run({ command: 'printf root' })
     assert.equal(second.ok, true, JSON.stringify(second))
@@ -143,9 +143,9 @@ test('a stale cached password is dropped and the next call asks again', async ()
     const second = await run()
     assert.equal(second.ok, true, JSON.stringify(second))
     assert.equal((await h.term.readLog()).length, 1, 'the next call asks for the replacement password')
-    const cached = getCachedSudoPassword(key)
-    assert.equal(cached?.toString(), 'fakepw')
-    cached?.fill(0)
+    const cached = getCachedSudoPasswordEntry(key, { identity: await resolveSshIdentity(target) })
+    assert.equal(cached?.password.toString(), 'fakepw')
+    cached?.password.fill(0)
   } finally {
     await h.cleanup()
   }

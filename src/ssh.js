@@ -197,8 +197,9 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
       timer = setTimeout(() => {
         killTree()
         // A descendant may hold the pipes after a complete -G output; keep the
-        // identity instead of discarding it.
-        if (/^hostname /m.test(out)) {
+        // identity instead of discarding it. Every field must be present:
+        // caching a hostname-only identity would later mismatch and re-prompt.
+        if (/^hostname /m.test(out) && /^user /m.test(out) && /^port /m.test(out)) {
           finish(resolve, out)
           return
         }

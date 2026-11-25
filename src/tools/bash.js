@@ -24,7 +24,7 @@ export function makeBashTool(target, cwd = target.root) {
       type: 'object',
       properties: {
         command: { type: 'string', minLength: 1, description: 'Bash command to run on the remote host.' },
-        description: { type: 'string', description: 'Short description of the command.' },
+        description: { type: 'string', description: 'Accepted for compatibility with callers that send it; not stored or returned.' },
         workdir: { type: 'string', description: 'Remote working directory; relative to target root by default.' },
         timeoutMs: { type: 'integer', minimum: 1, maximum: 600000, description: 'Foreground SSH request timeout in milliseconds; default 120000, cap 600000. Excludes prior connection preparation. Ignored in background mode. The remote process may survive timeout or cancellation; check state before retrying.' },
         run_in_background: { type: 'boolean', description: 'Start a persistent remote job with no runtime limit; timeoutMs is ignored. The launch SSH request has a 120-second timeout, excluding connection preparation.' },

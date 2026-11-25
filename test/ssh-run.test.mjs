@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { sshRun, sshSpawn } from '../src/ssh.js'
+import { resolveSshIdentity, sshRun, sshSpawn } from '../src/ssh.js'
 import { parseTargets } from '../src/target.js'
 import { setCachedSudoPassword, sudoCacheKey, sudoCacheSize } from '../src/sudocache.js'
 import { installFakeSsh } from './helpers.mjs'
@@ -127,4 +127,33 @@ test('the transport rejects NUL bytes and unpaired surrogates in a command', asy
 
 test('a target ssh destination rejects unpaired surrogates', () => {
   assert.throws(() => parseTargets([{ ssh: 'h\ud800', root: '/' }]), /surrogate/)
+  assert.throws(() => parseTargets([{ ssh: 'h', root: '/bad\ud800' }]), /surrogate/)
+  assert.throws(() => parseTargets([{ ssh: 'h', name: 'bad\ud800', root: '/' }]), /surrogate/)
+})
+
+test('resolveSshIdentity keeps a complete -G answer held open by a descendant', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_G_MODE = 'hold'
+  const started = Date.now()
+  try {
+    const identity = await resolveSshIdentity({ ssh: 'h' }, { timeoutMs: 300 })
+    assert.equal(identity, 'h\u0000testuser\u000022')
+  } finally {
+    delete process.env.FAKE_SSH_G_MODE
+    await fake.cleanup()
+  }
+  assert.ok(Date.now() - started >= 250, `the timeout path ran (${Date.now() - started}ms)`)
+})
+
+test('resolveSshIdentity rejects a partial -G answer on timeout', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_G_MODE = 'partial'
+  const started = Date.now()
+  try {
+    assert.equal(await resolveSshIdentity({ ssh: 'h' }, { timeoutMs: 300 }), undefined)
+  } finally {
+    delete process.env.FAKE_SSH_G_MODE
+    await fake.cleanup()
+  }
+  assert.ok(Date.now() - started >= 250, `the timeout path ran (${Date.now() - started}ms)`)
 })

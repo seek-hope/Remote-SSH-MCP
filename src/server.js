@@ -69,7 +69,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
   register('job_output', 'Read remote job status and merged stdout/stderr. Reuse next_offset for byte pagination. has_more:false means no more output currently, not that the job ended. completed does not mean success: check exit_code. For a v3 job, status "lost" means the worker died before finishing its bookkeeping (for example OOM or kill -9); descendants may still be running and cleanup is refused. Older jobs use the previous status rule. IDs survive MCP restarts. The SSH request timeout is 120 seconds, excluding connection preparation; it does not limit job runtime.', z.strictObject({
     ...jobFields,
     offset: z.number().int().nonnegative().optional().describe('0-based byte offset, not a line number. Default 0; pass next_offset from the previous result to continue.'),
-    limit: z.number().int().min(4).max(65536).optional().describe('Maximum output bytes to read; default and maximum 65536, minimum 4 (one full UTF-8 character, so next_offset always advances).'),
+    limit: z.number().int().min(4).max(65536).optional().describe('Maximum output bytes to read; default and maximum 65536, minimum 4 (a full 4-byte UTF-8 character). If a running/lost job ends with only 1-3 bytes of an incomplete character, next_offset may stay the same until more output arrives.'),
     cleanup: z.boolean().optional().describe('Default false. Permanently delete the job record and logs after this read. Requires a finished job and no more output after this chunk; consume needed earlier chunks first.'),
   }), async ({ target: name, ...args }, signal) => {
     const target = await findTarget(storeFile, name)

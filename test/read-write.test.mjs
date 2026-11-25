@@ -140,10 +140,13 @@ test('read stops scanning large files after the window but totals exactly at EOF
   assert.match(tail, new RegExp(`End of file - total ${count} lines`))
 }))
 
-test('read rejects a FIFO without blocking and writes follow symlinks', async () => fixture(async ({ dir, read, write }) => {
+test('read, write, and edit refuse non-regular files; writes follow symlinks', async () => fixture(async ({ dir, read, write, edit }) => {
   const fifo = join(dir, 'pipe')
   spawnSync('mkfifo', [fifo])
   await assert.rejects(read.execute({ file_path: fifo }, {}), /not a regular file/)
+  await assert.rejects(write.execute({ file_path: fifo, content: 'x' }, {}), /non-regular/)
+  await assert.rejects(edit.execute({ file_path: fifo, old_string: 'x', new_string: 'y' }, {}), /not a regular file/)
+  await assert.rejects(write.execute({ file_path: dir, content: 'x' }, {}), /non-regular/)
   const target = join(dir, 'target')
   await writeFile(target, 'old')
   const link = join(dir, 'link')
@@ -152,6 +155,22 @@ test('read rejects a FIFO without blocking and writes follow symlinks', async ()
   assert.equal(await readFile(target, 'utf8'), 'new')
   assert.equal((await lstat(link)).isSymbolicLink(), true)
 }))
+
+test('write and edit reject requests over the 8 MiB JSON budget before execution', async () => {
+  const target = { ssh: 'offline', name: 'fixture', root: '/', controlPersist: 0 }
+  await assert.rejects(
+    makeWriteTool(target).execute({ file_path: '/tmp/x', content: 'x'.repeat(8 * MiB + 1) }, {}),
+    /too large/,
+  )
+  await assert.rejects(
+    makeEditTool(target).execute({
+      file_path: '/tmp/x',
+      old_string: 'a'.repeat(4 * MiB),
+      new_string: 'b'.repeat(4 * MiB + 1),
+    }, {}),
+    /8 MiB MCP request budget/,
+  )
+})
 
 test('a path with an unpaired surrogate is rejected before execution', async () => fixture(async ({ write }) => {
   await assert.rejects(

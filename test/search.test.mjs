@@ -201,20 +201,62 @@ test('grep reports an unusable head instead of no matches', async () => {
   }
 })
 
-test('glob reports missing and unreadable paths instead of no matches', async () => {
+test('glob reports missing, non-directory, and unreadable paths distinctly', async () => {
   const ssh = await installLocalSsh()
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-err-'))
   const locked = join(dir, 'locked')
+  const unreadable = join(dir, 'unreadable')
   try {
     const glob = () => makeGlobTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
     await assert.rejects(glob().execute({ pattern: '*.txt', path: join(dir, 'missing') }, exec), /no such directory/)
     await writeFile(join(dir, 'file.txt'), '')
-    await assert.rejects(glob().execute({ pattern: '*.txt', path: join(dir, 'file.txt') }, exec), /no such directory/)
+    await assert.rejects(glob().execute({ pattern: '*.txt', path: join(dir, 'file.txt') }, exec), /not a directory/)
     await mkdir(locked)
     await chmod(locked, 0)
-    await assert.rejects(glob().execute({ pattern: '*.txt' }, exec), /Permission denied|glob:/)
+    await assert.rejects(glob().execute({ pattern: '*.txt' }, exec), (error) => {
+      assert.match(error.message, /Permission denied/)
+      assert.doesNotMatch(error.message, /Traceback/)
+      return true
+    })
+    // A root reachable only through an unsearchable parent is a permission
+    // error, not "no such directory".
+    await mkdir(join(unreadable, 'inner'), { recursive: true })
+    await chmod(unreadable, 0)
+    await assert.rejects(glob().execute({ pattern: '*.txt', path: join(unreadable, 'inner') }, exec), /permission denied/)
   } finally {
     await chmod(locked, 0o755).catch(() => {})
+    await chmod(unreadable, 0o755).catch(() => {})
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('grep at exactly the match cap reports no truncation', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-exact-'))
+  try {
+    await writeFile(join(dir, 'many.txt'), 'hit\n'.repeat(250))
+    const out = await makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+      .execute({ pattern: 'hit' }, exec)
+    assert.doesNotMatch(out, /truncated/)
+    assert.equal(out.split('\n').filter(line => /^\d+:hit$/.test(line)).length, 250)
+  } finally {
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('grep caps encoded output at 512 KiB', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-bytes-'))
+  try {
+    const line = 'x'.repeat(8192) + 'hit'
+    await writeFile(join(dir, 'long.txt'), `${line}\n`.repeat(70))
+    const out = await makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+      .execute({ pattern: 'hit' }, exec)
+    assert.match(out, /\[output truncated at 512 KiB/)
+    assert.ok(Buffer.byteLength(out) <= 600 * 1024, `bounded output (${Buffer.byteLength(out)} bytes)`)
+  } finally {
     await ssh.cleanup()
     await rm(dir, { recursive: true, force: true })
   }

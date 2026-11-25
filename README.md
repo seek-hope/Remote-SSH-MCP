@@ -141,7 +141,7 @@ node src/cli.js --help
 - `name`（可选）：目标名称，必须唯一；省略时使用规范化后的 SSH 目标。
 - `ssh`（必填）：`~/.ssh/config` 中的别名或 `user@host`。支持 `user@host:2222` 与 `user@[::1]:2222`；裸 IPv6 地址的端口用 `port` 指定。该字段不接受整条 shell 命令，也不接受密码。
 - `port`（可选）：SSH 端口覆盖；仅 `port: null` 会清除它，更新时重复传入相同的 `ssh` 不会丢弃已有端口。
-- `root`（必填）：远端绝对路径，不接受 NUL 或 `..` 路径段。
+- `root`（必填）：远端绝对路径，不接受 NUL、`..` 路径段或不成对的 UTF-16 代理项（`name` 同样不接受后者）。
 - `controlPersist`（可选）：连接复用保留时间，单位为秒，默认 43200（12 小时），上限 31536000；`0` 或 `null` 禁用连接复用。
 
 ### 连接复用
@@ -230,13 +230,13 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 ### 搜索
 
-`glob` 按 glob 模式匹配文件路径，不返回目录，结果按修改时间倒序，最多 100 项。模式不含 `/` 时匹配任意深度的文件名；`.git`、`.svn`、`.hg` 与 `node_modules` 目录会被跳过。结果在内部以 NUL 分隔，因此文件名中的换行不会破坏结构；无法用 UTF-8 表示的文件名会被跳过。文件名本身含换行时，返回文本会原样显示，阅读时可能看起来像两行。不可读的目录或不存在/非目录的路径会返回错误，而不是当作没有匹配。
+`glob` 按 glob 模式匹配文件路径，不返回目录，结果按修改时间倒序，最多 100 项。模式不含 `/` 时匹配任意深度的文件名；`.git`、`.svn`、`.hg` 与 `node_modules` 目录会被跳过。结果在内部以 NUL 分隔，因此文件名中的换行不会破坏结构；无法用 UTF-8 表示的文件名会被跳过。文件名本身含换行时，返回文本会原样显示，阅读时可能看起来像两行。不可读的目录或不存在/非目录的路径会返回错误，而不是当作没有匹配。glob 与 grep 的 SSH 请求超时为 120 秒，不包含前置连接准备。
 
-`grep` 使用 POSIX 扩展正则搜索文件内容，按文件分组返回带行号的结果，最多 250 条，编码后的输出上限 512 KiB；超长行会被缩短并标注（不会拆开代理对），整个返回结果在本地截断前必须低于 4 MiB 传输上限；文件名不是合法 UTF-8 或无法解析的记录会被跳过并计数，匹配文本中的非 UTF-8 字节会显示为替换字符。`include` 可用于限定文件名模式；`.git` 与 `node_modules` 目录以及二进制文件会被跳过。远程 `head` 缺少 `-z` 时会明确报错，而不是返回“无匹配”。
+`grep` 使用 POSIX 扩展正则搜索文件内容，按文件分组返回带行号的结果，最多 250 条，编码后的输出上限 512 KiB；超长行会被缩短并标注（不会拆开代理对），整个返回结果在本地截断前必须低于 4 MiB 传输上限；文件名不是合法 UTF-8 或无法解析的记录会被跳过并计数，匹配文本中的非 UTF-8 字节会显示为替换字符；文件名本身含换行时，返回文本同样可能看起来像多行。`include` 可用于限定文件名模式；`.git` 与 `node_modules` 目录以及二进制文件会被跳过。远程 `head` 缺少 `-z` 时会明确报错，而不是返回“无匹配”。
 
 ### 命令执行
 
-`bash` 在远端执行命令，每次调用启动新的 shell，命令以 SSH 账户的权限运行。前台命令默认超时 120 秒，上限 600 秒；`run_in_background: true` 时改为启动持久后台任务。
+`bash` 在远端执行命令，每次调用启动新的 shell，命令以 SSH 账户的权限运行。前台命令默认超时 120 秒，上限 600 秒；编码后的命令超过 96 KiB 单个 SSH 参数上限时会被拒绝，应改用后台任务或先把脚本写入远端文件。`run_in_background: true` 时改为启动持久后台任务。
 
 ### 提权执行（sudo）
 
@@ -260,7 +260,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 远端 sudo 不分配 tty（`sudo -S` 从 stdin 读取密码），因此 sudoers 必须未启用 `requiretty`。密码路径还要求 sudo 保留认证票据（`timestamp_timeout` 非 0）；密码路径下 `timestamp_timeout=0` 的主机会明确报错而不是降级。若要使用免密探测，`NOPASSWD` 必须让 `sudo -n -v` 成功，并且覆盖工具实际执行的包装命令 `bash`（通常是 `NOPASSWD: ALL`）；只对目标命令授予的 `NOPASSWD` 不能授权这个包装，此时不受 `timestamp_timeout=0` 限制。
 
-密码被拒绝后会立即从缓存清除并返回认证失败；下一次调用会重新提示，不会在同一次调用里自动重试（避免命令被二次执行）。同一 MCP 进程内、缓存启用时，同一目的地的并发调用共享一个终端（关闭缓存或使用多个 MCP 进程时各自提示）。`remote_ssh_targets` 的 `remove`、改变 `ssh`/`port` 的 `update` 以及 `disconnect` 会清除**当前 MCP 进程**中该目的地的缓存密码；其他进程的缓存按 TTL 自然到期。MCP 进程退出时也会清零。缓存条目绑定到 `ssh -G` 解析出的 host/user/port，并在每次密码路径使用前复核：修改 `~/.ssh/config` 的 HostName/User/Port 后，旧条目会被丢弃并重新提示；管理操作仍按别名 + 端口清除，host-key 校验失败时也会自动清除。
+密码被拒绝后会立即从缓存清除并返回认证失败；下一次调用会重新提示，不会在同一次调用里自动重试（避免命令被二次执行）。同一 MCP 进程内、缓存启用时，同一目的地的并发调用共享一个终端（关闭缓存或使用多个 MCP 进程时各自提示）。`remote_ssh_targets` 的 `remove`、改变 `ssh`/`port` 的 `update` 以及 `disconnect` 会清除**当前 MCP 进程**中该目的地的缓存密码；其他进程的缓存按 TTL 自然到期。MCP 进程退出时也会清零。缓存条目绑定到 `ssh -G` 解析出的 host/user/port，并在每次密码路径使用前复核：修改 `~/.ssh/config` 的 HostName/User/Port 后，旧条目会被丢弃并重新提示；若本次无法解析身份，也不会复用已绑定身份的条目。管理操作仍按别名 + 端口清除，host-key 校验失败时也会自动清除。
 
 **安全边界**：密码会短暂经过远端 `sudo -v` 进程与 drain `bash` 的内存。目标主机上已有的 root 进程（包括之前以 root 运行并留下的守护进程）可以读取这些内存、替换 `sudo`/`bash`，从而捕获后续密码；这是“可以向该主机执行 root 命令”的固有后果。**同一远端账户下的任何进程**（包括通过本服务的 `bash`/后台任务启动的进程）也可以读取该 SSH 会话 stdin 管道中的密码、杀死或干扰 sudo 包装脚本；远端账户本身必须是可信的，不要在该账户上同时运行不可信任务。不要把重要账户的密码交给一个允许模型任意以 root 运行命令的主机；优先使用 `NOPASSWD`、一次性凭据或隔离账户。若目标指向本机（如 `localhost`），其 root 命令可以直接读取 MCP 进程内存中的缓存。本机同一用户的其他进程可以连接密码提示 socket（0700 目录只隔离其他用户），注入错误密码造成拒绝服务，但不会收到真实密码；它可以读取 socket 路径并抢在真实客户端之前应答。
 
@@ -280,7 +280,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 {"target":"gpu","job_id":"<job_id>","offset":0,"limit":65536}
 ```
 
-结果包含 `status`、`exit_code`、`output`、`next_offset` 与 `has_more`，输出合并 stdout 与 stderr。`offset` 是从 0 开始的字节偏移，不是行号；`limit` 以字节计，最小 4（保证至少一个完整 UTF-8 字符，`next_offset` 总能前进），默认及上限均为 65536。将 `next_offset` 作为下一次调用的 `offset` 可无重复地继续读取；跨页的多字节 UTF-8 字符会留到下一页，不会被替换成 U+FFFD。`has_more: false` 只表示当前没有更多输出，并不表示任务已经结束，应同时检查 `status` 和 `exit_code`。
+结果包含 `status`、`exit_code`、`output`、`next_offset` 与 `has_more`，输出合并 stdout 与 stderr。`offset` 是从 0 开始的字节偏移，不是行号；`limit` 以字节计，最小 4（足以容纳一个完整 4 字节 UTF-8 字符），默认及上限均为 65536；若 `running`/`lost` 任务的末尾只有 1–3 字节的不完整字符，`next_offset` 可能暂时不前进，直到有更多输出。将 `next_offset` 作为下一次调用的 `offset` 可无重复地继续读取；跨页的多字节 UTF-8 字符会留到下一页，不会被替换成 U+FFFD。`has_more: false` 只表示当前没有更多输出，并不表示任务已经结束，应同时检查 `status` 和 `exit_code`。
 
 后台模式忽略 `bash.timeoutMs`，任务本身没有运行时限；启动、查询与终止任务的 SSH 请求超时均为 120 秒，不包含前置连接准备。如果启动失败信息中包含 `job_id`，应先查询该 ID，避免重复启动。
 
@@ -319,7 +319,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | `REMOTE_SSH_LOCK_GRACE_MS` | `5000`；空锁被判定为过期前的宽限时间 |
 | `REMOTE_SSH_LOCK_RETRY_MS` | `50`；配置锁重试间隔 |
 
-SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`），在 MCP 进程环境中设置不会生效。
+SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`）。服务本身不转发环境变量；除非另行配置 ssh `SendEnv` 与 sshd `AcceptEnv`，在 MCP 进程环境中设置不会传到远端。
 
 ## 测试
 

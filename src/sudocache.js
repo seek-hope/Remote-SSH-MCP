@@ -101,8 +101,10 @@ export function getCachedSudoPassword(key, now = Date.now()) {
 /**
  * Like getCachedSudoPassword, but also returns the entry token so a failed
  * authentication can drop exactly the entry it used (never a newer one that a
- * concurrent prompt just stored), and enforces the resolved SSH identity when
- * one is supplied.
+ * concurrent prompt just stored). Reuse requires the recorded identity to
+ * equal the supplied one; in particular, an entry recorded with a resolved
+ * identity is not reused when identity resolution now fails (both undefined
+ * is allowed for environments without `ssh -G`).
  * @param {string} key
  * @param {{ now?: number, identity?: string }} [options]
  * @returns {{ password: Buffer, token: number } | undefined}
@@ -110,7 +112,7 @@ export function getCachedSudoPassword(key, now = Date.now()) {
 export function getCachedSudoPasswordEntry(key, { now = Date.now(), identity } = {}) {
   const entry = entries.get(key)
   if (entry === undefined) return undefined
-  if (entry.expiresAt <= now || (identity !== undefined && entry.identity !== identity)) {
+  if (entry.expiresAt <= now || entry.identity !== identity) {
     dropEntry(key)
     return undefined
   }

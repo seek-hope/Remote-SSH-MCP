@@ -101,6 +101,20 @@ test('entries are bound to the resolved SSH identity and their own token', () =>
   const first = getCachedSudoPasswordEntry(key, { now: 1500, identity: 'h\u0000u\u000022' })
   setCachedSudoPassword(key, Buffer.from('y'), 1000, 1000, undefined, 'h\u0000u\u000022')
   dropCachedSudoPassword(key, first.token)
-  assert.equal(getCachedSudoPassword(key, 1500)?.toString(), 'y', 'a stale failure cannot drop a newer entry')
+  assert.equal(getCachedSudoPasswordEntry(key, { now: 1500, identity: 'h\u0000u\u000022' })?.password.toString(), 'y',
+    'a stale failure cannot drop a newer entry')
+  clearAllSudoPasswords()
+})
+
+test('an identity-bound entry is not reused when identity resolution fails', () => {
+  clearAllSudoPasswords()
+  setCachedSudoPassword(key, Buffer.from('x'), 1000, 1000, undefined, 'host\u0000user\u000022')
+  assert.equal(getCachedSudoPasswordEntry(key, { now: 1500 }), undefined,
+    'an unverifiable credential is dropped instead of used')
+  assert.equal(sudoCacheSize(), 0)
+
+  // Without ssh -G on either call the alias key is all the binding available.
+  setCachedSudoPassword(key, Buffer.from('y'), 1000, 1000)
+  assert.equal(getCachedSudoPasswordEntry(key, { now: 1500 })?.password.toString(), 'y')
   clearAllSudoPasswords()
 })

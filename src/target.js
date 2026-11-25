@@ -20,7 +20,9 @@ function hasUnpairedSurrogate(text) {
 }
 
 export const targetFields = {
-  name: z.string().trim().min(1).optional().describe('Unique target name; defaults to the SSH destination.'),
+  name: z.string().trim().min(1)
+    .refine(value => !hasUnpairedSurrogate(value), 'Target name must not contain unpaired UTF-16 surrogates.')
+    .optional().describe('Unique target name; defaults to the SSH destination.'),
   // Keep this pattern portable: providers compile tool schemas with non-JavaScript
   // engines that reject lookaround (e.g. "^(?!-)") and bare "\0" escapes.
   ssh: z.string().trim().min(1)
@@ -28,7 +30,7 @@ export const targetFields = {
     .refine(value => !hasUnpairedSurrogate(value), 'SSH destination must not contain unpaired UTF-16 surrogates.')
     .describe('SSH alias or user@host; host:port and [IPv6]:port are accepted. Uses ~/.ssh/config.'),
   port: z.number().int().min(1).max(65535).optional(),
-  root: z.string().startsWith('/').refine(p => !p.includes('\0') && !p.split('/').includes('..'), 'Root must be an absolute remote path without NUL or .. segments.').describe('Default remote working directory, not a filesystem sandbox.'),
+  root: z.string().startsWith('/').refine(p => !p.includes('\0') && !p.split('/').includes('..') && !hasUnpairedSurrogate(p), 'Root must be an absolute remote path without NUL, .. segments, or unpaired UTF-16 surrogates.').describe('Default remote working directory, not a filesystem sandbox.'),
   controlPersist: z.number().int().min(0).max(MAX_CONTROL_PERSIST_SECONDS).nullable().optional().describe('Connection reuse in seconds; default 43200. 0/null disables reuse and requires noninteractive key/agent authentication.'),
 }
 

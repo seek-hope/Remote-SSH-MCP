@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -253,7 +254,9 @@ test('job_output requires a limit that can advance over a multi-byte character',
     await writeFile(join(job, 'state.json'), JSON.stringify({ pid: 999999, stamp: '0', version: 3 }))
     await writeFile(join(job, 'exit'), '0')
     await writeFile(join(job, 'done'), '')
-    await assert.rejects(call({ action: 'output', job_id, limit: 1 }), /limit must be between 4 and 65536/)
+    for (const limit of [1, 2, 3]) {
+      await assert.rejects(call({ action: 'output', job_id, limit }), /limit must be between 4 and 65536/)
+    }
     const first = await call({ action: 'output', job_id, limit: 4 })
     assert.equal(first.output, '😀')
     assert.equal(first.next_offset, 4)
@@ -261,6 +264,31 @@ test('job_output requires a limit that can advance over a multi-byte character',
     const rest = await call({ action: 'output', job_id, offset: first.next_offset, limit: 4 })
     assert.equal(rest.output, 'x')
     assert.equal(rest.has_more, false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('job_output keeps a partial trailing character pending for a lost job', linux, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-partial-'))
+  const env = { ...process.env, REMOTE_SSH_JOB_DIR: join(dir, 'jobs') }
+  const job_id = randomUUID()
+  const job = join(env.REMOTE_SSH_JOB_DIR, job_id)
+  const call = async request => {
+    const proc = exec('python3', [script], { env, timeout: 10000 })
+    proc.child.stdin.end(JSON.stringify(request))
+    return JSON.parse((await proc).stdout)
+  }
+  try {
+    await mkdir(job, { recursive: true })
+    await writeFile(join(job, 'out'), Buffer.from('😀').subarray(0, 3))
+    await writeFile(join(job, 'state.json'), JSON.stringify({ pid: 999999, stamp: '0', version: 3 }))
+    await writeFile(join(job, 'exit'), '0')
+    const out = await call({ action: 'output', job_id, limit: 4 })
+    assert.equal(out.status, 'lost')
+    assert.equal(out.output, '')
+    assert.equal(out.next_offset, 0, 'the incomplete character is not split')
+    assert.equal(out.has_more, true)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -308,6 +336,18 @@ test('an undecodable /proc comm does not break job bookkeeping', linux, async ()
   const bad = spawn('python3', ['-c', 'import ctypes,time; ctypes.CDLL(None).prctl(15, b"bad\\xffcomm", 0, 0, 0); time.sleep(5)'])
   bad.unref()
   try {
+    // Guard against a vacuous test: the helper must really expose a comm that
+    // strict UTF-8 decoding rejects, or members()/alive() never see it.
+    let undecodable = false
+    for (let i = 0; i < 100 && !undecodable; i++) {
+      try {
+        new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(`/proc/${bad.pid}/stat`))
+        await delay(10)
+      } catch {
+        undecodable = true
+      }
+    }
+    assert.equal(undecodable, true, 'the helper must expose an undecodable comm')
     await fixture(async ({ invoke, job_id, dir }) => {
       assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'sleep 0.2; echo ok' })).status, 'started')
       let out
