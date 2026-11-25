@@ -33,8 +33,8 @@ def members():
         if not entry.name.isdigit() or int(entry.name) == pid:
             continue
         try:
-            info = Path(entry.path, 'stat').read_text().rsplit(')', 1)[1].split()
-        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            info = Path(entry.path, 'stat').read_text(errors='surrogateescape').rsplit(')', 1)[1].split()
+        except (OSError, UnicodeError):
             continue
         if info[0] != 'Z' and (int(info[2]) == pid or int(info[3]) == pid):
             yield int(entry.name)
@@ -54,7 +54,7 @@ def terminate(*_):
         signal_members(signal.SIGTERM)
 
 signal.signal(signal.SIGTERM, terminate)
-stamp = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]
+stamp = Path('/proc/self/stat').read_text(errors='surrogateescape').rsplit(')', 1)[1].split()[19]
 (job / 'state.tmp').write_text(json.dumps({'pid': pid, 'stamp': stamp, 'version': 3}))
 (job / 'state.tmp').replace(job / 'state.json')
 
@@ -116,9 +116,9 @@ while True:
 
 def alive(state):
     try:
-        stat = Path('/proc/%s/stat' % state['pid']).read_text().rsplit(')', 1)[1].split()
+        stat = Path('/proc/%s/stat' % state['pid']).read_text(errors='surrogateescape').rsplit(')', 1)[1].split()
         return stat[0] != 'Z' and stat[19] == state['stamp']
-    except (FileNotFoundError, ProcessLookupError, PermissionError):
+    except (OSError, UnicodeError):
         return False
 
 
@@ -142,7 +142,7 @@ def signal_worker(state, sig):
     if alive(state):
         try:
             os.kill(state['pid'], sig)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
 

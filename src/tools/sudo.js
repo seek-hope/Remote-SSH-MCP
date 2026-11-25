@@ -10,6 +10,7 @@
 import { runSudoCommand } from '../sudo.js'
 import { resolveRemote } from '../target.js'
 import { checkArgs, defTextTool } from '../toolkit.js'
+import { hasBinaryContent } from './files.js'
 
 export function makeSudoTool(target, cwd = target.root) {
   return defTextTool({
@@ -26,6 +27,8 @@ export function makeSudoTool(target, cwd = target.root) {
     },
     async execute(args, exec) {
       const a = checkArgs('sudo', args, { command: 'string', workdir: '?string', timeoutMs: '?integer' })
+      if (hasBinaryContent(a.command)) throw new Error('sudo: command must be UTF-8 text without NUL bytes or unpaired surrogates')
+      if (hasBinaryContent(a.workdir ?? '')) throw new Error('sudo: workdir must be UTF-8 text without NUL bytes or unpaired surrogates')
       const dir = resolveRemote(a.workdir ?? '.', cwd)
       const result = await runSudoCommand(target, {
         command: a.command,

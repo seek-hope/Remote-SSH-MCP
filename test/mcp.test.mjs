@@ -137,6 +137,7 @@ test('MCP exposes authentication, timeout and job safety guidance in tool metada
   assert.match(output.offset.description, /0-based byte offset/)
   assert.match(output.limit.description, /bytes.*65536/)
   assert.equal(output.limit.maximum, 65536)
+  assert.equal(output.limit.minimum, 4)
   assert.match(output.cleanup.description, /Permanently delete/)
   assert.equal(byName.job_output.annotations.readOnlyHint, false)
   assert.match(byName.job_output.description, /has_more:false.*not that the job ended/)

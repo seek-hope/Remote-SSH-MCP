@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { GLOB_PY, makeGrepTool } from '../src/tools/search.js'
+import { GLOB_PY, makeGlobTool, makeGrepTool } from '../src/tools/search.js'
 import { installFakeSsh, installLocalSsh, remoteCommand } from './helpers.mjs'
 
 const target = { ssh: 'h', name: 'h', controlPersist: 0 }
@@ -156,10 +156,94 @@ test('grep line shortening does not split a surrogate pair', async () => {
   try {
     const out = await makeGrepTool(target, '/remote').execute({ pattern: 'x' }, exec)
     assert.match(out, /\[line truncated\]/)
-    assert.ok(!out.includes('\ud83d'), 'no lone high surrogate at the cut')
+    assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(out), 'no lone high surrogate at the cut')
+    assert.ok(!/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(out), 'no lone low surrogate at the cut')
   } finally {
     delete process.env.FAKE_SSH_STDOUT
     delete process.env.FAKE_SSH_MARK
     await fake.cleanup()
+  }
+})
+
+test('grep keeps matches whose lines end with CR (CRLF files)', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_STDOUT = 'dir/crlf.txt__NUL__1:hit\r\ndir/crlf.txt__NUL__3:hit\r\n'
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    const out = await makeGrepTool(target, '/remote').execute({ pattern: 'hit' }, exec)
+    assert.match(out, /dir\/crlf\.txt\n1:hit\n3:hit/)
+    assert.doesNotMatch(out, /skipped/)
+  } finally {
+    delete process.env.FAKE_SSH_STDOUT
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+})
+
+test('grep reports an unusable head instead of no matches', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-head-'))
+  const shim = await mkdtemp(join(tmpdir(), 'remote-ssh-head-shim-'))
+  await writeFile(join(dir, 'f.txt'), 'hit\n')
+  await writeFile(join(shim, 'head'), '#!/bin/sh\necho "head: invalid option -- z" >&2\nexit 1\n', { mode: 0o755 })
+  const previous = process.env.PATH
+  process.env.PATH = `${shim}:${previous}`
+  try {
+    await assert.rejects(
+      makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir).execute({ pattern: 'hit' }, exec),
+      /head -z failed/,
+    )
+  } finally {
+    process.env.PATH = previous
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+    await rm(shim, { recursive: true, force: true })
+  }
+})
+
+test('glob reports missing and unreadable paths instead of no matches', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-err-'))
+  const locked = join(dir, 'locked')
+  try {
+    const glob = () => makeGlobTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+    await assert.rejects(glob().execute({ pattern: '*.txt', path: join(dir, 'missing') }, exec), /no such directory/)
+    await writeFile(join(dir, 'file.txt'), '')
+    await assert.rejects(glob().execute({ pattern: '*.txt', path: join(dir, 'file.txt') }, exec), /no such directory/)
+    await mkdir(locked)
+    await chmod(locked, 0)
+    await assert.rejects(glob().execute({ pattern: '*.txt' }, exec), /Permission denied|glob:/)
+  } finally {
+    await chmod(locked, 0o755).catch(() => {})
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('glob uses UTF-8 filenames regardless of the remote locale', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-locale-'))
+  const previous = {
+    LC_ALL: process.env.LC_ALL,
+    LANG: process.env.LANG,
+    PYTHONUTF8: process.env.PYTHONUTF8,
+    PYTHONCOERCECLOCALE: process.env.PYTHONCOERCECLOCALE,
+  }
+  try {
+    await writeFile(join(dir, 'valid-é.txt'), '')
+    process.env.LC_ALL = 'C'
+    process.env.LANG = 'C'
+    process.env.PYTHONUTF8 = '0'
+    process.env.PYTHONCOERCECLOCALE = '0'
+    const out = await makeGlobTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+      .execute({ pattern: '*.txt' }, exec)
+    assert.match(out, /valid-é\.txt/)
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
   }
 })

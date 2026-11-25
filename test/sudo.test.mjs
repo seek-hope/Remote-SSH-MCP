@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildSudoPromptScript, runSudoCommand } from '../src/sudo.js'
+import { makeSudoTool } from '../src/tools/sudo.js'
 import {
   clearAllSudoPasswords,
   getCachedSudoPassword,
@@ -468,10 +469,10 @@ test('a command that prints its own cmdline is not misreported as a cd failure',
 })
 
 test('a short-budget waiter does not abort a shared prompt for a longer caller', async () => {
-  const h = await harness({ password: 'fakepw', terminalDelayMs: 1500 })
+  const h = await harness({ password: 'fakepw', terminalDelayMs: 2500 })
   try {
     const [short, long] = await Promise.all([
-      run({ timeoutMs: 500 }),
+      run({ timeoutMs: 1200 }),
       run({ timeoutMs: 10_000 }),
     ])
     assert.equal(short.ok, false)
@@ -481,4 +482,23 @@ test('a short-budget waiter does not abort a shared prompt for a longer caller',
   } finally {
     await h.cleanup()
   }
+})
+
+test('a timed-out sudo command keeps output truncation flags', async () => {
+  const h = await harness({ ticket: true })
+  try {
+    const result = await run({ command: "head -c 600000 /dev/zero | tr '\\0' a; sleep 2", timeoutMs: 500 })
+    assert.equal(result.timedOut, true)
+    assert.equal(result.stdoutTruncated, true)
+    assert.ok(result.stdout.length <= 512 * 1024)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('the sudo tool rejects undecodable commands before prompting', async () => {
+  const tool = makeSudoTool({ ssh: 'h', name: 'h', root: '/', controlPersist: 0 })
+  const signal = new AbortController().signal
+  await assert.rejects(tool.execute({ command: 'echo \ud800' }, { signal }), /surrogate|UTF-8/)
+  await assert.rejects(tool.execute({ command: 'id', workdir: 'bad\ud800' }, { signal }), /surrogate|UTF-8/)
 })

@@ -4,11 +4,29 @@ import * as z from 'zod/v4'
 const DEFAULT_CONTROL_PERSIST_SECONDS = 43_200
 const MAX_CONTROL_PERSIST_SECONDS = 31_536_000
 
+/** True when the string contains a UTF-16 surrogate that has no pair. */
+function hasUnpairedSurrogate(text) {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(i + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true
+      i += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true
+    }
+  }
+  return false
+}
+
 export const targetFields = {
   name: z.string().trim().min(1).optional().describe('Unique target name; defaults to the SSH destination.'),
   // Keep this pattern portable: providers compile tool schemas with non-JavaScript
   // engines that reject lookaround (e.g. "^(?!-)") and bare "\0" escapes.
-  ssh: z.string().trim().min(1).regex(/^[^-\s\x00][^\s\x00]*$/, 'Expected an SSH alias or user@host, not an option.').describe('SSH alias or user@host; host:port and [IPv6]:port are accepted. Uses ~/.ssh/config.'),
+  ssh: z.string().trim().min(1)
+    .regex(/^[^-\s\x00][^\s\x00]*$/, 'Expected an SSH alias or user@host, not an option.')
+    .refine(value => !hasUnpairedSurrogate(value), 'SSH destination must not contain unpaired UTF-16 surrogates.')
+    .describe('SSH alias or user@host; host:port and [IPv6]:port are accepted. Uses ~/.ssh/config.'),
   port: z.number().int().min(1).max(65535).optional(),
   root: z.string().startsWith('/').refine(p => !p.includes('\0') && !p.split('/').includes('..'), 'Root must be an absolute remote path without NUL or .. segments.').describe('Default remote working directory, not a filesystem sandbox.'),
   controlPersist: z.number().int().min(0).max(MAX_CONTROL_PERSIST_SECONDS).nullable().optional().describe('Connection reuse in seconds; default 43200. 0/null disables reuse and requires noninteractive key/agent authentication.'),

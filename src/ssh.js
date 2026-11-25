@@ -102,17 +102,17 @@ function controlArgs(opts) {
 }
 
 /** The shell transport is text: NUL and unpaired surrogates would be mutated. */
-function assertTextCommand(command) {
-  if (typeof command !== 'string') throw new Error('sshSpawn: command must be a string')
-  if (command.includes('\0')) throw new Error('remote command contains a NUL byte, which the shell transport would drop')
-  for (let i = 0; i < command.length; i++) {
-    const code = command.charCodeAt(i)
+function assertNoNulOrUnpaired(text, label) {
+  if (typeof text !== 'string') throw new Error(`${label} must be a string`)
+  if (text.includes('\0')) throw new Error(`${label} contains a NUL byte, which the shell transport would drop`)
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
     if (code >= 0xd800 && code <= 0xdbff) {
-      const next = command.charCodeAt(i + 1)
-      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error('remote command contains an unpaired UTF-16 surrogate')
+      const next = text.charCodeAt(i + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error(`${label} contains an unpaired UTF-16 surrogate`)
       i += 1
     } else if (code >= 0xdc00 && code <= 0xdfff) {
-      throw new Error('remote command contains an unpaired UTF-16 surrogate')
+      throw new Error(`${label} contains an unpaired UTF-16 surrogate`)
     }
   }
 }
@@ -123,7 +123,8 @@ export async function sshSpawn(opts, command) {
   if (typeof target !== 'string' || !target || target.startsWith('-') || /[\s\0]/.test(target)) {
     throw new Error(`sshSpawn: target must be a non-empty ssh destination string (received ${typeof target})`)
   }
-  assertTextCommand(command)
+  assertNoNulOrUnpaired(target, 'ssh destination')
+  assertNoNulOrUnpaired(command, 'remote command')
   const ctl = controlArgs({ controlPersist })
   if (effectiveControlPersist({ controlPersist }) > 0) await ensureControlDir()
   const portOptionArgs = portArgs({ port })
@@ -195,6 +196,12 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
       }
       timer = setTimeout(() => {
         killTree()
+        // A descendant may hold the pipes after a complete -G output; keep the
+        // identity instead of discarding it.
+        if (/^hostname /m.test(out)) {
+          finish(resolve, out)
+          return
+        }
         finish(reject, new Error('ssh -G timed out'))
       }, Math.max(1, Math.min(timeoutMs, 5000)))
       child.stdout.on('data', (chunk) => {

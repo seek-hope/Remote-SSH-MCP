@@ -16,7 +16,7 @@ const jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value))
 async function remoteFile(target, action, path, args, stdin, signal) {
   const output = await sshExec({
     target: target.ssh, port: target.port, controlPersist: target.controlPersist,
-    command: `python3 -c ${shq(FILE_SCRIPT)} ${[action, path, ...args].map(shq).join(' ')}`,
+    command: `PYTHONUTF8=1 python3 -c ${shq(FILE_SCRIPT)} ${[action, path, ...args].map(shq).join(' ')}`,
     stdin, signal,
   }).catch(error => { throw new Error(`${action}: ${path}: ${error.message}`) })
   try {

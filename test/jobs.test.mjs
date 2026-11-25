@@ -291,7 +291,7 @@ test('a v3 job with an exit file but no done marker is lost and refuses cleanup'
 })
 
 test('a set -m descendant in the same session keeps the job running and is killed', linux, async () => fixture(async ({ invoke, job_id, dir }) => {
-  assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'set -m; sleep 3 &' })).status, 'started')
+  assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'set -m; sleep 10 &' })).status, 'started')
   let status
   for (let i = 0; i < 50; i++) {
     const out = await invoke({ action: 'output', job_id, limit: 8 })
@@ -303,3 +303,24 @@ test('a set -m descendant in the same session keeps the job running and is kille
   assert.equal((await invoke({ action: 'kill', job_id })).status, 'killed')
   await until(async () => (await invoke({ action: 'output', job_id, limit: 8 })).status === 'killed')
 }))
+
+test('an undecodable /proc comm does not break job bookkeeping', linux, async () => {
+  const bad = spawn('python3', ['-c', 'import ctypes,time; ctypes.CDLL(None).prctl(15, b"bad\\xffcomm", 0, 0, 0); time.sleep(5)'])
+  bad.unref()
+  try {
+    await fixture(async ({ invoke, job_id, dir }) => {
+      assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'sleep 0.2; echo ok' })).status, 'started')
+      let out
+      for (let i = 0; i < 100; i++) {
+        out = await invoke({ action: 'output', job_id, limit: 65536 })
+        if (out.status !== 'running') break
+        await delay(25)
+      }
+      assert.equal(out.status, 'completed')
+      assert.equal(out.exit_code, 0)
+      assert.match(out.output, /ok/)
+    })
+  } finally {
+    bad.kill('SIGKILL')
+  }
+})

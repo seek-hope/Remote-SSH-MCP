@@ -10,7 +10,7 @@ const JOB_SCRIPT = readFileSync(new URL('../jobs.py', import.meta.url), 'utf8')
 export async function remoteJob(target, request, signal) {
   const output = await sshExec({
     target: target.ssh, port: target.port, controlPersist: target.controlPersist,
-    command: `python3 -c ${shq(JOB_SCRIPT)}`,
+    command: `PYTHONUTF8=1 python3 -c ${shq(JOB_SCRIPT)}`,
     stdin: JSON.stringify(request), signal, timeoutMs: 120_000,
   })
   return JSON.parse(output.toString('utf8'))
@@ -34,6 +34,7 @@ export function makeBashTool(target, cwd = target.root) {
     async execute(args, exec) {
       const a = checkArgs('bash', args, { command: 'string', description: '?string', workdir: '?string', timeoutMs: '?integer', run_in_background: '?boolean' })
       if (hasBinaryContent(a.command)) throw new Error('bash: command must be UTF-8 text without NUL bytes or unpaired surrogates')
+      if (hasBinaryContent(a.workdir ?? '')) throw new Error('bash: workdir must be UTF-8 text without NUL bytes or unpaired surrogates')
       const dir = resolveRemote(a.workdir ?? '.', cwd)
       if (a.run_in_background) {
         const job_id = randomUUID()

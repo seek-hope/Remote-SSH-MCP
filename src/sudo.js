@@ -532,6 +532,8 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
       code: null,
       stdout: result.stdout,
       stderr: stripMarks(result.stderr, marks),
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
       error: `sudo command did not finish within ${timeoutMs}ms`,
     }
   }

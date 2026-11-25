@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { chmod, readFile, readdir, stat, writeFile, symlink, lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { makeReadTool, makeWriteTool, makeEditTool } from '../src/tools/files.js'
+import { makeBashTool } from '../src/tools/bash.js'
 import { installLocalSsh, installFakeSsh } from './helpers.mjs'
 
 const MiB = 1024 * 1024
@@ -158,3 +159,11 @@ test('a path with an unpaired surrogate is rejected before execution', async () 
     /surrogate/,
   )
 }))
+
+test('bash rejects NUL and unpaired surrogates in commands and workdir', async () => {
+  const bash = makeBashTool({ ssh: 'offline', name: 'fixture', root: '/', controlPersist: 0 })
+  const signal = new AbortController().signal
+  await assert.rejects(bash.execute({ command: 'echo \0' }, { signal }), /UTF-8/)
+  await assert.rejects(bash.execute({ command: 'echo \ud800', run_in_background: true }, { signal }), /surrogate|UTF-8/)
+  await assert.rejects(bash.execute({ command: 'true', workdir: 'bad\ud800' }, { signal }), /surrogate|UTF-8/)
+})

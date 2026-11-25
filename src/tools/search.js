@@ -65,7 +65,11 @@ basename_mode = '/' not in pattern
 results = []
 total = 0
 skipped_dirs = {'.git', '.svn', '.hg', 'node_modules'}
-for dirpath, dirnames, filenames in os.walk(root):
+# Report unreadable directories instead of silently returning "no files".
+def onerror(error):
+    sys.stderr.write('glob: %s\n' % error)
+    sys.exit(2)
+for dirpath, dirnames, filenames in os.walk(root, onerror=onerror):
     dirnames[:] = [d for d in dirnames if d not in skipped_dirs]
     for name in filenames:
         full = os.path.join(dirpath, name)
@@ -121,11 +125,14 @@ export function makeGlobTool(target, cwd = target.root) {
       const r = await sshRun({
         target: target.ssh, port: target.port,
         controlPersist: target.controlPersist,
-        command: `test -d ${shq(root)} && python3 -c ${shq(GLOB_PY)} ${shq(a.pattern)} ${shq(root)} ${GLOB_CAP}`,
+        command: `if [ ! -d ${shq(root)} ]; then echo "__REMOTE_SSH_ERR__:no-such-dir" >&2; exit 2; fi\nPYTHONUTF8=1 python3 -c ${shq(GLOB_PY)} ${shq(a.pattern)} ${shq(root)} ${GLOB_CAP}`,
         signal: exec.signal,
       })
       if (r.timedOut) throw new Error(`glob: search timed out on ${target.name}`)
-      if (r.code !== 0) throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
+      if (r.code !== 0) {
+        if (r.stderr.includes('__REMOTE_SSH_ERR__:no-such-dir')) throw new Error(`glob: no such directory on ${target.name}: ${root}`)
+        throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
+      }
       if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
       // Paths are NUL-delimited so filenames containing newlines stay intact;
       // the total marker is the text after the last NUL.
@@ -171,7 +178,7 @@ export function makeGrepTool(target, cwd = target.root) {
       // records so 251 complete `filename\0line:text\n` records are passed
       // (the 251st NUL terminates the sentinel filename, preserving the cap
       // signal even when it is unparseable or non-UTF-8).
-      const search = `grep -rHInE --null${include} --exclude-dir=.git --exclude-dir=node_modules -e ${shq(a.pattern)} -- ${shq(root)} | head -z -n ${GREP_CAP + 1}; rc=\${PIPESTATUS[0]}; [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || [ "$rc" -eq 141 ]`
+      const search = `grep -rHInE --null${include} --exclude-dir=.git --exclude-dir=node_modules -e ${shq(a.pattern)} -- ${shq(root)} | head -z -n ${GREP_CAP + 1}; st=("\${PIPESTATUS[@]}"); rc=\${st[0]}; [ "\${st[1]}" -eq 0 ] || { echo "grep: head -z failed (GNU coreutils 8.25+ required)" >&2; exit 3; }; [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || [ "$rc" -eq 141 ]`
       const script = [
         `if [ ! -e ${shq(root)} ]; then echo "__REMOTE_SSH_ERR__:no-such-path"`,
         `else bash -c ${shq(search)}; fi`,
@@ -216,12 +223,15 @@ export function makeGrepTool(target, cwd = target.root) {
       let bytes = 0
       let cut = false
       for (const { file, body } of shown) {
-        const m = body.match(/^(\d+):(.*)$/)
+        // CRLF (and U+2028/U+2029) are valid text; `.` alone would not match a
+        // trailing CR, so use [\s\S] and strip one display CR.
+        const m = body.match(/^(\d+):([\s\S]*)$/)
         if (!m) {
           malformed += 1
           continue
         }
-        let text = m[2]
+        const rawText = m[2].endsWith('\r') ? m[2].slice(0, -1) : m[2]
+        let text = rawText
         if (text.length > MAX_GREP_LINE_CHARS) {
           let cut = MAX_GREP_LINE_CHARS
           const last = text.charCodeAt(cut - 1)

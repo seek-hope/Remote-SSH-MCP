@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { sshRun, sshSpawn } from '../src/ssh.js'
+import { parseTargets } from '../src/target.js'
 import { setCachedSudoPassword, sudoCacheKey, sudoCacheSize } from '../src/sudocache.js'
 import { installFakeSsh } from './helpers.mjs'
 
@@ -122,4 +123,8 @@ test('the transport rejects NUL bytes and unpaired surrogates in a command', asy
   await assert.rejects(sshSpawn({ target: 'h', controlPersist: 0 }, 'echo \ud800'), /surrogate/)
   const spec = await sshSpawn({ target: 'h', controlPersist: 0 }, 'echo 😀')
   assert.ok(spec.args.at(-1).includes('base64'))
+})
+
+test('a target ssh destination rejects unpaired surrogates', () => {
+  assert.throws(() => parseTargets([{ ssh: 'h\ud800', root: '/' }]), /surrogate/)
 })

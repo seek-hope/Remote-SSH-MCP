@@ -22,7 +22,7 @@ npm run verify
 | --- | --- | --- |
 | `Lock.tla` | 目标配置锁（`src/lock.js`） | `MutualExclusion`、`GateExclusion`、`NoHusk`、`TypeOK` |
 | `Warmup.tla` | 连接预热去重（`src/ssh.js`） | `NoConcurrentTerminals`、`TerminalNeedsInteractive`、`NoTerminalWhileCached`、`SingleWarmup` |
-| `Jobs.tla` | 后台任务生命周期（`src/jobs.py`） | `NoCleanupWhileRunning`、`NoUnreadOutputLost`、`StatusConsistent` |
+| `Jobs.tla` | 后台任务生命周期（`src/jobs.py`） | `NoCleanupWhileRunning`、`NoUnreadOutputLost`、`StatusConsistent`（定义性） |
 | `Sudo.tla` | sudo 密码信息流与内存缓存（`src/sudo.js`、`src/sudocache.js`） | `ObservableSecrecy`、`CacheBounded`、`TypeOK` |
 
 保留为反例/对照（预期被 TLC 反证）：
@@ -67,13 +67,13 @@ npm run verify
 
 `Jobs.tla` 对 `src/jobs.py` 建模：启动、写输出、正常结束、崩溃、kill、记录退出码、读取、清理，以及由存活状态、退出文件、killed 标记派生的状态。
 
-模型中的 `running` 表示 worker 存活。worker 会保持到进程组/会话内非僵尸成员全部退出，并由 worker 自身在 TERM 宽限期后升级为 KILL（`job_kill` 请求进程中断不影响升级）。实现侧要求 v3 worker 在连续两次扫描确认无成员后写 `done` 收尾标记；对 v3 任务，没有 `done` 的 `killed`/`completed` 一律报告 `lost` 并拒绝清理（v1/v2 旧任务沿用旧规则）。`Jobs.tla` 是简化抽象，没有表示 `done`、`lost`、session 成员与清理拒绝，因此 `StatusConsistent`/`NoCleanupWhileRunning` 只覆盖模型中的状态；上述升级路径由 `test/jobs.test.mjs` 覆盖。
+模型中的 `running` 表示 worker 存活。worker 会保持到进程组/会话内非僵尸成员全部退出，并由 worker 自身在 TERM 宽限期后升级为 KILL（`job_kill` 请求进程中断不影响升级）。实现侧要求 v3 worker 在连续两次扫描确认无成员后写 `done` 收尾标记；对 v3 任务，没有 `done` 的 `killed`/`completed` 一律报告 `lost` 并拒绝清理（v1/v2 旧任务沿用旧规则）。`Jobs.tla` 是简化抽象：模型中的 `lost` 只表示崩溃且无退出记录，不表示 v3 的 `done` 规则；`StatusConsistent` 是定义性一致性检查（`Status` 的分支本身即蕴含其取值），不能检测实现的 v3 派生；session 成员与清理拒绝也未建模。v3 规则由 `test/jobs.test.mjs` 覆盖。
 
 验证的性质：
 
 - `NoCleanupWhileRunning`：进程存活时绝不删除任务目录；
 - `NoUnreadOutputLost`：未读到输出末尾时绝不删除任务目录（清理要求本次读取已到达文件末尾）；
-- `StatusConsistent`：`running`/`completed`/`killed` 恒与记录事实一致。
+- `StatusConsistent`：模型内的定义性一致性检查（`Status` 的分支本身即蕴含其取值）；不覆盖实现的 v3 `done`/`lost` 派生。
 
 ## sudo 密码信息流
 
