@@ -181,7 +181,7 @@ async function readOwnerRecord(lockPath) {
   } catch (e) {
     // Permanent shape/missing errors mean an ownerless husk; EACCES/EIO/EMFILE
     // are UNKNOWN and callers must not treat the lock as dead.
-    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP'].includes(e?.code)) return undefined
+    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO'].includes(e?.code)) return undefined
     throw e
   }
   let raw
@@ -189,13 +189,19 @@ async function readOwnerRecord(lockPath) {
     const info = await handle.stat()
     // FIFO/device/directory/socket, or an implausibly large planted file.
     if (!info.isFile() || info.size > 64 * 1024) return undefined
-    // Bound the read even if the file grows after the fstat.
-    const buf = Buffer.alloc(64 * 1024 + 1)
-    const { bytesRead } = await handle.read(buf, 0, buf.length, 0)
-    if (bytesRead > 64 * 1024) return undefined
-    raw = buf.subarray(0, bytesRead).toString('utf8')
+    // Bound the read even if the file grows after the fstat, and loop because
+    // regular-file reads may be short.
+    const buf = Buffer.alloc(Math.min(info.size, 64 * 1024) + 1)
+    let total = 0
+    while (total < buf.length) {
+      const { bytesRead } = await handle.read(buf, total, buf.length - total, total)
+      if (bytesRead === 0) break
+      total += bytesRead
+    }
+    if (total > 64 * 1024) return undefined
+    raw = buf.subarray(0, total).toString('utf8')
   } catch (e) {
-    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP'].includes(e?.code)) return undefined
+    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO'].includes(e?.code)) return undefined
     throw e
   } finally {
     await handle.close().catch(() => {})
@@ -521,10 +527,39 @@ export function withStoreLock(file, fn, opts) {
   const prev = storeQueues.get(file) ?? Promise.resolve()
   const run = prev.then(async () => {
     opts?.signal?.throwIfAborted?.()
-    await mkdir(dirname(file), { recursive: true, mode: 0o700 })
+    // Create missing parents one component at a time and chmod each: a
+    // recursive mkdir's mode is umask-masked and a 0000 parent blocks its
+    // own children under a restrictive umask.
+    const dir = dirname(file)
+    const missing = []
+    let existing = dir
+    for (;;) {
+      try {
+        const info = await stat(existing)
+        if (!info.isDirectory()) throw new Error(`store parent ${existing} is not a directory`)
+        break
+      } catch (e) {
+        if (e?.code !== 'ENOENT') throw e
+        const parent = dirname(existing)
+        if (parent === existing) throw e
+        missing.unshift(basename(existing))
+        existing = parent
+      }
+    }
+    for (const part of missing) {
+      existing = join(existing, part)
+      try {
+        await mkdir(existing, { mode: 0o700 })
+      } catch (e) {
+        if (e?.code !== 'EEXIST') throw e
+        continue
+      }
+      await chmod(existing, 0o700)
+    }
     const lockOpts_ = lockOpts(opts)
     const handle = await acquireStoreLock(file, lockOpts_)
     try {
+      opts?.signal?.throwIfAborted?.()
       return await fn()
     } finally {
       await releaseStoreLock(handle)

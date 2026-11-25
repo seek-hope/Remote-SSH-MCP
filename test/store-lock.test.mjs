@@ -842,3 +842,35 @@ test('a symlink loop at the lock path is recovered', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('lock creation chmods newly created nested directories under a restrictive umask', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'dsh-store-nested-umask-'))
+  const file = join(base, 'a', 'b', 'targets.json')
+  const previous = process.umask(0o777)
+  try {
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+    assert.equal((await stat(join(base, 'a'))).mode & 0o777, 0o700)
+    assert.equal((await stat(join(base, 'a', 'b'))).mode & 0o777, 0o700)
+    await assert.rejects(stat(`${file}.lock`), /ENOENT/)
+  } finally {
+    process.umask(previous)
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('save refuses a store larger than the read cap and keeps the old file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-save-cap-'))
+  const file = join(dir, 'targets.json')
+  try {
+    await saveTargetStore(file, [{ name: 'ok', ssh: 'h', root: '/' }])
+    const before = await readFile(file, 'utf8')
+    await assert.rejects(
+      saveTargetStore(file, [{ name: 'x'.repeat(9 * 1024 * 1024), ssh: 'h', root: '/' }]),
+      /exceed/,
+    )
+    assert.equal(await readFile(file, 'utf8'), before)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

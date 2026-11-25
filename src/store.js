@@ -57,8 +57,13 @@ export async function saveTargetStore(file, targets) {
   const tmp = join(dir, `${TMP_PREFIX}${process.pid}.${randomUUID()}${TMP_SUFFIX}`)
   // JSON.stringify omits optional fields whose value is undefined.
   const body = targets.map((t) => ({ ...t, name: t.name, ssh: t.ssh, root: t.root }))
+  const text = JSON.stringify(body, null, 2) + '\n'
+  // Refuse a save that the read path (and every later call) would reject.
+  if (Buffer.byteLength(text, 'utf8') > MAX_STORE_BYTES) {
+    throw new Error(`target store would exceed the ${MAX_STORE_BYTES}-byte limit; shorten name/ssh/root values`)
+  }
   try {
-    await writeFile(tmp, JSON.stringify(body, null, 2) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    await writeFile(tmp, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
     // writeFile's mode is masked by the process umask; enforce the documented
     // 0600 before publishing the file.
     await chmod(tmp, 0o600)
