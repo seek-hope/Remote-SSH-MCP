@@ -92,7 +92,9 @@ def translate(pat):
     return ''.join(out)
 
 try:
-    rx = re.compile('^' + translate(pattern) + r'\Z')
+    # re.S lets ** (translated to .*) cross newlines in path names; a
+    # single * uses [^/]* and already does. Literal dots are escaped.
+    rx = re.compile('^' + translate(pattern) + r'\Z', re.S)
 except re.error:
     # A malformed class/range must not print a Python traceback to the user.
     sys.stderr.write('__REMOTE_SSH_ERR__:bad-pattern\n')

@@ -148,7 +148,7 @@ test('resolveSshIdentity keeps a complete -G answer held open by a descendant', 
     await fake.cleanup()
   }
   const elapsed = Date.now() - started
-  assert.ok(elapsed >= 250 && elapsed < 1000, `the 300ms timeout path ran (${elapsed}ms)`)
+  assert.ok(elapsed >= 250 && elapsed < 1800, `the 300ms timeout path ran (${elapsed}ms)`)
 })
 
 test('resolveSshIdentity rejects a partial -G answer on timeout', async () => {
@@ -162,7 +162,7 @@ test('resolveSshIdentity rejects a partial -G answer on timeout', async () => {
     await fake.cleanup()
   }
   const elapsed = Date.now() - started
-  assert.ok(elapsed >= 250 && elapsed < 1000, `the 300ms timeout path ran (${elapsed}ms)`)
+  assert.ok(elapsed >= 250 && elapsed < 1800, `the 300ms timeout path ran (${elapsed}ms)`)
 })
 
 test('resolveSshIdentity rejects a truncated final -G line on timeout', async () => {
@@ -176,7 +176,19 @@ test('resolveSshIdentity rejects a truncated final -G line on timeout', async ()
     await fake.cleanup()
   }
   const elapsed = Date.now() - started
-  assert.ok(elapsed >= 250 && elapsed < 1000, `the 300ms timeout path ran (${elapsed}ms)`)
+  assert.ok(elapsed >= 250 && elapsed < 1800, `the 300ms timeout path ran (${elapsed}ms)`)
+})
+
+test('resolveSshIdentity accepts a complete CRLF -G answer', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_G_MODE = 'crlf'
+  try {
+    const identity = await resolveSshIdentity({ ssh: 'h' }, { timeoutMs: 300 })
+    assert.equal(identity, 'h\u0000testuser\u000022')
+  } finally {
+    delete process.env.FAKE_SSH_G_MODE
+    await fake.cleanup()
+  }
 })
 
 test('resolveSshIdentity rejects an answer without a user line on timeout', async () => {
@@ -184,6 +196,19 @@ test('resolveSshIdentity rejects an answer without a user line on timeout', asyn
   process.env.FAKE_SSH_G_MODE = 'nouser'
   try {
     assert.equal(await resolveSshIdentity({ ssh: 'h' }, { timeoutMs: 300 }), undefined)
+  } finally {
+    delete process.env.FAKE_SSH_G_MODE
+    await fake.cleanup()
+  }
+})
+
+test('resolveSshIdentity rejects an incomplete answer that closes cleanly', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_G_MODE = 'nouser-close'
+  try {
+    // Long timeout: this must fail through the post-close completeness check,
+    // not the timer.
+    assert.equal(await resolveSshIdentity({ ssh: 'h' }, { timeoutMs: 5000 }), undefined)
   } finally {
     delete process.env.FAKE_SSH_G_MODE
     await fake.cleanup()

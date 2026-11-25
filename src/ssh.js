@@ -159,7 +159,8 @@ export function shq(s) {
  * complete resolution miss and prompt again.
  */
 function completeSshIdentity(out) {
-  return /^hostname .+\n/m.test(out) && /^user .+\n/m.test(out) && /^port .+\n/m.test(out)
+  // Accept LF and CRLF: `.` matches the CR, and `pick()` trims it later.
+  return /^hostname .+\r?\n/m.test(out) && /^user .+\r?\n/m.test(out) && /^port .+\r?\n/m.test(out)
 }
 
 /**

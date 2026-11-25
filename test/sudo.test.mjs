@@ -142,6 +142,22 @@ test('a disabled cache is not used even when an entry is still present', async (
   }
 })
 
+test('a failed no-cache prompt does not drop unrelated cached slots', async () => {
+  const h = await harness({ password: 'right', terminalPassword: 'wrong' })
+  setCachedSudoPassword(key, Buffer.from('keep'), 60_000)
+  process.env.REMOTE_SSH_SUDO_CACHE_MS = '0'
+  try {
+    const result = await run()
+    assert.equal(result.ok, false)
+    assert.match(result.error, /sudo authentication failed/)
+    assert.equal(sudoCacheSize(), 1, 'the disabled-cache call did not clear another slot')
+    assert.equal(getCachedSudoPasswordEntry(key)?.password.toString(), 'keep')
+  } finally {
+    delete process.env.REMOTE_SSH_SUDO_CACHE_MS
+    await h.cleanup()
+  }
+})
+
 test('a stale cached password is dropped and the next call asks again', async () => {
   const h = await harness({ password: 'fakepw' })
   const identity = await resolveSshIdentity(target)

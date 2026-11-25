@@ -260,4 +260,8 @@ NoOwnedHusk ==
   /\ (lockPresent /\ lockHusk) => lockOwner = NoOne
   /\ (gatePresent /\ gateHusk) => gateOwner = NoOne
 
+\* Negative reachability check (LockNoHusk.cfg): the environment can actually
+\* introduce a husk, so NoOwnedHusk is not vacuously true.
+NoHuskEver == ~(lockHusk \/ gateHusk)
+
 =============================================================================

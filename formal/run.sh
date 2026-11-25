@@ -67,6 +67,9 @@ expect_pass Sudo
 
 echo "########## refuted counter-designs ##########"
 expect_violation LockHuskRace LockHuskRace MutualExclusion
+# Reachability guard for Lock.tla: a husk can be introduced by the environment,
+# so NoOwnedHusk is exercised on non-vacuous states.
+expect_violation Lock LockNoHusk NoHuskEver
 expect_violation Warmup WarmupNoDedup NoConcurrentTerminals
 expect_violation Jobs JobsUnsafe NoUnreadOutputLost
 expect_violation Sudo SudoLeak ObservableSecrecy

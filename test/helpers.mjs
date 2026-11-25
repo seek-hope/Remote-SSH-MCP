@@ -27,12 +27,17 @@ if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE) {
     ? 'user testuser\\nhostname foo\\n'
     : mode === 'truncated'
       ? 'hostname h\\nuser testuser\\nport 22'
-      : mode === 'nouser'
+      : mode === 'nouser' || mode === 'nouser-close'
         ? 'hostname h\\nport 22\\n'
-        : 'hostname h\\nuser testuser\\nport 22\\n')
+        : mode === 'crlf'
+          ? 'hostname h\\r\\nuser testuser\\r\\nport 22\\r\\n'
+          : 'hostname h\\nuser testuser\\nport 22\\n')
   if (mode === 'partial') {
     // Block without timers or CPU until the resolver's SIGKILL.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
+  } else if (mode === 'nouser-close') {
+    // Clean close with an incomplete answer: exercises the post-close check.
+    process.exit(0)
   } else {
     const holder = require('node:child_process').spawn('sleep', ['2'], { stdio: ['ignore', 'inherit', 'ignore'] })
     holder.unref()

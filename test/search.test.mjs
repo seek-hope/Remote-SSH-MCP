@@ -19,6 +19,9 @@ test('glob translate: [!...] negation, depth anchoring, exact end anchor', async
     await writeFile(join(dir, 'a.ts'), '')
     await writeFile(join(dir, 'b.log'), '')
     await writeFile(join(dir, 'sub', 'c.ts'), '')
+    await writeFile(join(dir, 'a\nb.txt'), '')
+    await mkdir(join(dir, 'x\ny'))
+    await writeFile(join(dir, 'x\ny', 'c.txt'), '')
     await writeFile(join(dir, 'foo\n'), '') // a trailing newline must not let "foo" match
     // Paths are NUL-delimited; the total marker follows the last NUL.
     const run = (pattern) => {
@@ -29,6 +32,8 @@ test('glob translate: [!...] negation, depth anchoring, exact end anchor', async
     assert.deepEqual(run('[!a]*.ts'), [join(dir, 'sub', 'c.ts')]) // a.ts excluded by [!a]
     assert.deepEqual(run('*.ts'), [join(dir, 'a.ts'), join(dir, 'sub', 'c.ts')].sort())
     assert.deepEqual(run('sub/*.ts'), [join(dir, 'sub', 'c.ts')])
+    // `**` must cross newlines inside path components, like `*` does.
+    assert.deepEqual(run('**/*.txt'), [join(dir, 'a\nb.txt'), join(dir, 'x\ny', 'c.txt')].sort())
     assert.deepEqual(run('foo'), [])
   } finally {
     await rm(dir, { recursive: true, force: true })

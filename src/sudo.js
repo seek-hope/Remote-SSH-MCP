@@ -711,7 +711,8 @@ export async function runSudoCommand(target, {
     // The password was rejected. Drop exactly the entry this call used (never
     // a newer one a concurrent prompt just stored), without invalidating an
     // open prompt, and do NOT retry: user code must never run twice in a call.
-    dropCachedSudoPassword(sudoCacheKey(target), acquired.token)
+    // A no-cache prompt has no token and must not drop unrelated slots.
+    if (acquired.token !== undefined) dropCachedSudoPassword(sudoCacheKey(target), acquired.token)
     const detail = result.stderr ?? ''
     return {
       ok: false,

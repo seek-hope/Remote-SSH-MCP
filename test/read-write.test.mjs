@@ -133,9 +133,11 @@ test('edit runs in one SSH call and rejects missing, ambiguous and oversized rep
   // A result of exactly 4 MiB is allowed; the unique marker keeps old_string
   // unambiguous while the file stays at the limit.
   const marker = 'UNIQUE_MARKER_12345'
-  await writeFile(file, marker + 'x'.repeat(4 * MiB - marker.length))
+  const atLimit = marker + 'x'.repeat(4 * MiB - marker.length)
+  await writeFile(file, atLimit)
   await edit.execute({ file_path: file, old_string: marker, new_string: marker }, {})
   assert.equal((await stat(file)).size, 4 * MiB)
+  assert.equal(await readFile(file, 'utf8'), atLimit)
 }))
 
 test('read stops scanning large files after the window but totals exactly at EOF', async () => fixture(async ({ dir, read }) => {
@@ -158,6 +160,14 @@ test('read reports the exact total at exactly the 8 MiB scan boundary', async ()
   const out = await read.execute({ file_path: file, offset: count - 2, limit: 3 }, {})
   assert.match(out, new RegExp(`End of file - total ${count} lines`))
   assert.match(out, new RegExp(`${count}\\t${'L'.repeat(63)}`))
+  // An early window must also report the exact total: this is what tests the
+  // inclusive 8 MiB eager-scan boundary (a tail window can reach EOF anyway).
+  const early = await read.execute({ file_path: file, offset: 1, limit: 2 }, {})
+  assert.match(early, new RegExp(`Showing lines 1-2 of ${count}`))
+  const over = join(dir, 'over8')
+  await writeFile(over, line.repeat(count) + 'x'.repeat(64))
+  const beyond = await read.execute({ file_path: over, offset: 1, limit: 2 }, {})
+  assert.match(beyond, /Showing lines 1-2\. Use offset=3/)
 }))
 
 test('read, write, and edit refuse non-regular files; writes follow symlinks', async () => fixture(async ({ dir, read, write, edit }) => {

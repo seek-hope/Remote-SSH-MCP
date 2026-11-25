@@ -35,7 +35,7 @@ test('command and authentication sessions isolate interactive SSH settings but p
   // The documented minimum is OpenSSH 6.8, which does not understand these
   // config keywords. Only assert them when the local ssh can parse them; the
   // service's IgnoreUnknown list keeps passing those options on older clients.
-  const modernSupported = spawnSync('ssh', ['-G', '-F', modernConfig], {
+  const modernSupported = spawnSync('ssh', ['-G', '-F', modernConfig, 'alias'], {
     encoding: 'utf8', env: { ...process.env, PATH: originalPath }, timeout: 5000,
   }).status === 0
   const config = modernSupported ? modernConfig : coreConfig

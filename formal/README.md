@@ -20,7 +20,7 @@ npm run verify
 
 | 模型 | 对象 | 验证的性质 |
 | --- | --- | --- |
-| `Lock.tla` | 目标配置锁（`src/lock.js`） | `MutualExclusion`、`GateExclusion`、`NoHusk`、`TypeOK` |
+| `Lock.tla` | 目标配置锁（`src/lock.js`） | `MutualExclusion`、`GateExclusion`、`NoOwnedHusk`、`TypeOK` |
 | `Warmup.tla` | 连接预热去重（`src/ssh.js`） | `NoConcurrentTerminals`、`TerminalNeedsInteractive`、`NoTerminalWhileCached`、`SingleWarmup` |
 | `Jobs.tla` | 后台任务生命周期（`src/jobs.py`） | `NoCleanupWhileRunning`、`NoUnreadOutputLost`、`StatusConsistent`（定义性） |
 | `Sudo.tla` | sudo 密码信息流与内存缓存（`src/sudo.js`、`src/sudocache.js`） | `ObservableSecrecy`、`CacheBounded`、`TypeOK` |
@@ -46,7 +46,7 @@ npm run verify
 
 结果是两个进程同时持锁，对目标配置做读改写就会丢失更新。触发条件是创建者在 `mkdir` 与写 owner 之间被停顿超过宽限期（默认 `graceMs = 5000`）。
 
-修复方式：获取锁改为私有 staging + 原子 `rename` 发布——先在 `lockPath.staging.<token>` 写完整 owner 记录，再 `rename` 到规范路径。协议不会发布空壳；规范路径要么不存在、要么带着完整 owner 记录。模型允许环境注入遗留空壳（仅在路径为空时），使替换/恢复动作可达；`Lock.tla` 验证 `NoOwnedHusk`（空壳永远没有 owner 记录）、`MutualExclusion`、`GateExclusion`、`TypeOK` 全部通过。
+修复方式：获取锁改为私有 staging + 原子 `rename` 发布——先在 `lockPath.staging.<token>` 写完整 owner 记录，再 `rename` 到规范路径。协议不会发布空壳；规范路径要么不存在、要么带着完整 owner 记录。模型允许环境注入遗留空壳（仅在路径为空时），使替换/恢复动作可达；`Lock.tla` 验证 `NoOwnedHusk`（空壳永远没有 owner 记录）、`MutualExclusion`、`GateExclusion`、`TypeOK` 全部通过。`LockNoHusk.cfg` 额外反证 `NoHuskEver`（无空壳），证明空壳注入确实可达，避免 `NoOwnedHusk` 因注入被移除而空洞通过。
 
 闸门（`<store>.lock.recover`）此前也有同样的空壳窗口（`mkdir` 后再写 owner）。修复后同样改为 staging + `rename` 发布；`Lock.tla` 显式建模其发布、接管（`GateMoveAside` + `GatePublish`）、对存活闸门的退避与遗留 husk 替换（环境注入后 `GateReplaceHusk` 可达），`GateExclusion` 通过。
 
