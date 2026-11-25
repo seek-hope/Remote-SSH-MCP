@@ -21,7 +21,19 @@ const argv = process.argv.slice(2)
 if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
 // resolveSshIdentity timeout tests: emit a complete (hold) or partial
 // (partial) -G answer, then keep the pipe open past the caller's deadline.
-if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE) {
+if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE === 'split-utf8') {
+  // Split the UTF-8 bytes of "héllo"/"usér" across pipe writes.
+  fs.writeSync(1, Buffer.from('hostname h', 'utf8'))
+  fs.writeSync(1, Buffer.from([0xc3]))
+  // Block (without timers) so the bytes reach the pipe as separate chunks.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60)
+  fs.writeSync(1, Buffer.concat([
+    Buffer.from([0xa9]),
+    Buffer.from('llo\\nuser us', 'utf8'),
+    Buffer.from([0xc3, 0xa9]),
+    Buffer.from('r\\nport 22\\n', 'utf8'),
+  ]))
+} else if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE) {
   const mode = process.env.FAKE_SSH_G_MODE
   fs.writeSync(1, mode === 'partial'
     ? 'user testuser\\nhostname foo\\n'

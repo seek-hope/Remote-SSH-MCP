@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
+import { StringDecoder } from 'node:string_decoder'
 import { effectiveControlPersist } from './target.js'
 import { clearCachedSudoPassword, sudoCacheKey } from './sudocache.js'
 import { withStoreLock } from './store.js'
@@ -182,7 +183,11 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
         detached: process.platform !== 'win32',
       })
       let out = ''
+      let outBytes = 0
       let err = ''
+      // Preserve multi-byte characters split across pipe chunks.
+      const outDecoder = new StringDecoder('utf8')
+      const errDecoder = new StringDecoder('utf8')
       let settled = false
       let timer
       const killTree = () => {
@@ -218,18 +223,23 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
       }, Math.max(1, Math.min(timeoutMs, 5000)))
       child.stdout.on('data', (chunk) => {
         if (settled) return
-        out += chunk.toString('utf8')
-        if (out.length > 512 * 1024) {
+        outBytes += chunk.length
+        out += outDecoder.write(chunk)
+        if (outBytes > 512 * 1024) {
           killTree()
           finish(reject, new Error('ssh -G output too large'))
         }
       })
       child.stderr.on('data', (chunk) => {
         if (settled) return
-        err = (err + chunk.toString('utf8')).slice(-4096)
+        err = (err + errDecoder.write(chunk)).slice(-4096)
       })
       child.on('error', (error) => finish(reject, error))
       child.on('close', (code) => {
+        if (!settled) {
+          out += outDecoder.end()
+          err += errDecoder.end()
+        }
         finish(code === 0 ? resolve : reject, code === 0 ? out : new Error(err.trim() || `ssh -G exited ${code}`))
       })
     })
@@ -511,7 +521,9 @@ async function warmControlMaster(target, options) {
   // for a real command. All MCP processes sharing this socket share its lock.
   const spec = await sshSpawn({ target: target.ssh, port: target.port, controlPersist: target.controlPersist }, 'true')
   const { stdout } = await execFileAsync(spec.command, ['-G', ...spec.args], { timeout: 10_000, maxBuffer: 512 * 1024 })
-  const socket = stdout.match(/^controlpath (.+)$/m)?.[1].trim()
+  // Require a complete line: a truncated clean-close answer must not become a
+  // lock key that differs from sshControl's own ControlPath expansion.
+  const socket = stdout.match(/^controlpath (.+)\r?\n/m)?.[1].trim()
   if (!socket || socket === 'none') throw new Error('OpenSSH did not resolve a reusable ControlPath')
   return withStoreLock(socket, async () => {
     const existing = await sshControl(target, 'check', 10_000)

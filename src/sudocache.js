@@ -21,7 +21,7 @@
  */
 
 const DEFAULT_TTL_MS = 20 * 60 * 1000
-/** Bound the number of destinations holding a secret at once. */
+/** Bound the number of destination/identity slots holding a secret at once. */
 const MAX_ENTRIES = 32
 
 /**

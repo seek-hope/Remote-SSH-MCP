@@ -38,6 +38,14 @@ test('command and authentication sessions isolate interactive SSH settings but p
   const modernSupported = spawnSync('ssh', ['-G', '-F', modernConfig, 'alias'], {
     encoding: 'utf8', env: { ...process.env, PATH: originalPath }, timeout: 5000,
   }).status === 0
+  // Guard the probe itself: on a client new enough for all these keywords it
+  // must report supported, otherwise the modern assertions silently vanish.
+  const version = spawnSync('ssh', ['-V'], { encoding: 'utf8', env: { ...process.env, PATH: originalPath } })
+  const versionText = `${version.stdout ?? ''}${version.stderr ?? ''}`
+  const modernClient = /OpenSSH_(\d+)\.(\d+)/.exec(versionText)
+  if (modernClient && (Number(modernClient[1]) > 8 || (Number(modernClient[1]) === 8 && Number(modernClient[2]) >= 7))) {
+    assert.equal(modernSupported, true, 'the feature probe must detect supported options')
+  }
   const config = modernSupported ? modernConfig : coreConfig
   try {
     await sshExec({ target: 'alias', port: 2200, controlPersist: 0, command: 'true' })

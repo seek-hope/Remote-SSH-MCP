@@ -140,7 +140,7 @@ node src/cli.js --help
 
 - `name`（可选）：目标名称，必须唯一；省略时使用规范化后的 SSH 目标。
 - `ssh`（必填）：`~/.ssh/config` 中的别名或 `user@host`。支持 `user@host:2222` 与 `user@[::1]:2222`；裸 IPv6 地址的端口用 `port` 指定。该字段不接受整条 shell 命令，也不接受密码。
-- `port`（可选）：SSH 端口覆盖；仅 `port: null` 会清除它，更新时重复传入相同的 `ssh` 不会丢弃已有端口。
+- `port`（可选）：SSH 端口覆盖；`port: null` 会清除它。更新时重复传入相同的 `ssh` 不会丢弃已有端口；改变 `ssh` 且未显式提供端口时，旧端口覆盖会被清除，避免把旧主机的端口带到新别名。
 - `root`（必填）：远端绝对路径，不接受 NUL、`..` 路径段或不成对的 UTF-16 代理项（`name` 同样不接受后者）。
 - `controlPersist`（可选）：连接复用保留时间，单位为秒，默认 43200（12 小时），上限 31536000；`0` 或 `null` 禁用连接复用。
 
@@ -252,7 +252,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 - 认证阶段只运行 `-v`，命令每次调用最多执行一次，且认证失败时不会自动重试；
 - 命令的语法错误、信号退出或非零退出码都是普通结果，不会被误判为认证失败（START/POST 标记证明命令确实启动过）。
 
-密码不会写入文件、日志、工具参数、工具结果或 argv，也不会被回显；MCP 进程只在缓存有效期内持有内存副本，单次调用的临时副本在 SSH 接受 stdin 后立即清零。提示中的目的地让用户能确认密码将发往哪台主机。
+密码不会写入文件、日志、工具参数、工具结果或 argv，也不会被回显；MCP 进程只在缓存有效期内持有内存副本（TTL 超过约 24.8 天时只有惰性清零，见上），单次调用的临时副本在 SSH 接受 stdin 后立即清零。提示中的目的地让用户能确认密码将发往哪台主机。
 
 ```json
 {"target":"gpu","command":"apt-get update","workdir":"/"}
@@ -260,7 +260,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 远端 sudo 不分配 tty（`sudo -S` 从 stdin 读取密码），因此 sudoers 必须未启用 `requiretty`。密码路径还要求 sudo 保留认证票据（`timestamp_timeout` 非 0）；密码路径下 `timestamp_timeout=0` 的主机会明确报错而不是降级。若要使用免密探测，`NOPASSWD` 必须让 `sudo -n -v` 成功，并且覆盖工具实际执行的包装命令 `bash`（通常是 `NOPASSWD: ALL`）；只对目标命令授予的 `NOPASSWD` 不能授权这个包装，此时仍走密码路径并受 `timestamp_timeout=0` 限制，会报票据复核失败而不是降级。
 
-密码被拒绝后会立即从缓存清除并返回认证失败；下一次调用会重新提示，不会在同一次调用里自动重试（避免命令被二次执行）。同一 MCP 进程内、缓存启用时，同一目的地且解析身份相同的并发调用共享一个终端；身份不同（例如某次 `ssh -G` 失败）时各自提示（关闭缓存或使用多个 MCP 进程时也各自提示）。`remote_ssh_targets` 的 `remove`、改变 `ssh`/`port` 的 `update` 以及 `disconnect` 会清除**当前 MCP 进程**中该目的地的缓存密码；其他进程的缓存按 TTL 自然到期。MCP 进程退出时也会清零。缓存按目的地（别名 + 端口）与 `ssh -G` 解析出的 host/user/port 分槽保存：修改 `~/.ssh/config` 的 HostName/User/Port 后，旧槽不再命中并会重新提示（旧槽随 TTL 到期）；若本次无法解析身份，也不会命中已绑定身份的槽。同一目的地的不同身份并发时各自使用独立槽，互不覆盖。管理操作按别名 + 端口清除全部槽，host-key 校验失败时也会自动清除。
+密码被拒绝后会立即从缓存清除并返回认证失败；下一次调用会重新提示，不会在同一次调用里自动重试（避免命令被二次执行）。同一 MCP 进程内、缓存启用时，同一目的地且解析身份相同的并发调用共享一个终端；身份不同（例如某次 `ssh -G` 失败）时各自提示（关闭缓存或使用多个 MCP 进程时也各自提示）。`remote_ssh_targets` 的 `remove`、改变 `ssh`/`port` 的 `update` 以及 `disconnect` 会清除**当前 MCP 进程**中该目的地的缓存密码；其他进程的缓存按 TTL 自然到期。MCP 进程退出时也会清零。缓存按目的地（别名 + 端口）与 `ssh -G` 解析出的 host/user/port 分槽保存：修改 `~/.ssh/config` 的 HostName/User/Port 后，旧槽不再命中并会重新提示（旧槽随 TTL 到期）；若本次无法解析身份，也不会命中已绑定身份的槽。同一目的地的不同身份并发时各自使用独立槽，互不覆盖。缓存最多保留 32 个目的地/身份槽，超出时优先淘汰最接近到期的条目（可能提前重新提示）。管理操作按别名 + 端口清除全部槽，host-key 校验失败时也会自动清除。
 
 **安全边界**：密码会短暂经过远端 `sudo -v` 进程与 drain `bash` 的内存。目标主机上已有的 root 进程（包括之前以 root 运行并留下的守护进程）可以读取这些内存、替换 `sudo`/`bash`，从而捕获后续密码；这是“可以向该主机执行 root 命令”的固有后果。**同一远端账户下的任何进程**（包括通过本服务的 `bash`/后台任务启动的进程）也可以读取该 SSH 会话 stdin 管道中的密码、杀死或干扰 sudo 包装脚本；远端账户本身必须是可信的，不要在该账户上同时运行不可信任务。不要把重要账户的密码交给一个允许模型任意以 root 运行命令的主机；优先使用 `NOPASSWD`、一次性凭据或隔离账户。若目标指向本机（如 `localhost`），其 root 命令可以直接读取 MCP 进程内存中的缓存。本机同一用户的其他进程可以连接密码提示 socket（0700 目录只隔离其他用户），注入错误密码造成拒绝服务，但不会收到真实密码；它可以读取 socket 路径并抢在真实客户端之前应答。
 
@@ -342,7 +342,7 @@ TLA2TOOLS_JAR=/path/to/tla2tools.jar npm run verify
 - `formal/Jobs.tla`：进程存活或输出未读尽时绝不删除任务目录；模型内的定义性状态一致性（v3 的 `done`/`lost` 派生由测试覆盖）；
 - `formal/Sudo.tla`：sudo 密码只出现在终端、本机 Unix socket、MCP 内存缓存、SSH stdin 与远端 sudo stdin；缓存副本有绝对截止时间，密码不进入工具结果、磁盘、日志或 argv。模型覆盖 `TTL >= 1`；每次调用的临时副本、ppid 票据、drain、固定包装标记与“命令读不回未消费密码”由 `test/sudo.test.mjs` 的本地真实包装脚本回归覆盖，不在模型范围内。
 
-同时保留四个“反设计”对照，TLC 必须仍然反证它们，以证明模型对该性质确实敏感：`LockHuskRace.tla`（`MutualExclusion`）、`WarmupNoDedup`（`NoConcurrentTerminals`）、`JobsUnsafe`（`NoUnreadOutputLost`）、`SudoLeak`（`ObservableSecrecy`）。其中 `LockHuskRace` 记录了一次真实修复：创建者在 `mkdir` 与写 owner 之间停顿超过宽限期时，其按路径写入可能落入后继进程的锁目录，导致两者同时进入临界区。详见 [`formal/README.md`](formal/README.md)。
+同时保留四个“反设计”对照，TLC 必须仍然反证它们，以证明模型对该性质确实敏感：`LockHuskRace.tla`（`MutualExclusion`）、`WarmupNoDedup`（`NoConcurrentTerminals`）、`JobsUnsafe`（`NoUnreadOutputLost`）、`SudoLeak`（`ObservableSecrecy`）。另有 `Lock.tla` + `LockNoHusk.cfg` 的可达性对照：反证 `NoHuskEver`，证明环境确实能注入遗留空壳，避免 `NoOwnedHusk` 变成空洞不变式。其中 `LockHuskRace` 记录了一次真实修复：创建者在 `mkdir` 与写 owner 之间停顿超过宽限期时，其按路径写入可能落入后继进程的锁目录，导致两者同时进入临界区。详见 [`formal/README.md`](formal/README.md)。
 
 ## 许可证
 

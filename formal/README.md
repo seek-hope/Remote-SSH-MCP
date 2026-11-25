@@ -30,6 +30,7 @@ npm run verify
 | 模型 + 配置 | 反证的不变量 | 说明 |
 | --- | --- | --- |
 | `LockHuskRace.tla` | `MutualExclusion` | 修复前的锁协议 |
+| `Lock.tla` + `LockNoHusk.cfg` | `NoHuskEver` | 可达性对照：环境注入空壳确实可达，保证 `NoOwnedHusk` 非空洞 |
 | `Warmup.tla` + `WarmupNoDedup.cfg` | `NoConcurrentTerminals` | 假设"每个调用各自预热"的去重缺失 |
 | `Jobs.tla` + `JobsUnsafe.cfg` | `NoUnreadOutputLost` | 假设清理不检查未读输出 |
 | `Sudo.tla` + `SudoLeak.cfg` | `ObservableSecrecy` | 假设密码被写入工具结果、磁盘、日志或 argv |
@@ -79,7 +80,7 @@ npm run verify
 
 `Sudo.tla` 对 `src/sudo.js` 与 `src/sudocache.js` 的信息流契约建模。密码的允许通道：本地终端变量、交付给 MCP 的本机私有 Unix socket、MCP 进程内存缓存（自输入起至多 `TTL` 个时钟拍）、SSH stdin 管道、远端 sudo stdin。
 
-内存缓存是一项显式的、有界的取舍：MCP 进程可以持有密码副本，但 `CacheBounded` 要求它在绝对截止时间到达后不再可读；实现侧由每条目的到期定时器与读取时的截止检查共同清零，逻辑上以截止时间为准（清零动作可能晚于截止时间几毫秒）。`LeakTo*`（由 `SudoLeak.cfg` 打开）建模一个把密码复制到工具结果、磁盘、日志或 argv 的错误设计，TLC 会反证 `ObservableSecrecy`。模型覆盖 `TTL >= 1`；`REMOTE_SSH_SUDO_CACHE_MS=0` 的关闭模式不缓存，未在模型中表示。
+内存缓存是一项显式的、有界的取舍：MCP 进程可以持有密码副本，但 `CacheBounded` 要求它在绝对截止时间到达后不再可读；实现侧由每条目的到期定时器与读取时的截止检查共同清零，逻辑上以截止时间为准（清零动作可能晚于截止时间几毫秒）；TTL 超过约 24.8 天时没有定时器，只有读取时的惰性清零。`LeakTo*`（由 `SudoLeak.cfg` 打开）建模一个把密码复制到工具结果、磁盘、日志或 argv 的错误设计，TLC 会反证 `ObservableSecrecy`。模型覆盖 `TTL >= 1`；`REMOTE_SSH_SUDO_CACHE_MS=0` 的关闭模式不缓存，未在模型中表示。
 
 验证的性质：
 
