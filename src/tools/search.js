@@ -29,13 +29,17 @@ pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 # escapes the next character (it is not itself a member). Ranges are emitted
 # only for safe single-character endpoints so a literal '-' cannot turn into
 # an unintended regex range.
-CLASS_SPECIAL = set('\\]^-')
+# &, |, ~ and [ are literal in today's Python classes but are reserved by
+# UTS #18 set operations; escaping them keeps the glob meaning stable.
+CLASS_SPECIAL = set('\\]^-&|~[')
 
 def class_escape(ch):
     return '\\' + ch if ch in CLASS_SPECIAL else ch
 
 def range_safe(ch):
-    return ch != '-' and ch not in CLASS_SPECIAL and ch != '/'
+    # Escaped endpoints are valid regex range endpoints ([\--c], [\]-a]);
+    # only the path separator is forbidden in a class.
+    return ch != '/'
 
 def translate_class(body):
     negate = body[:1] in ('!', '^')

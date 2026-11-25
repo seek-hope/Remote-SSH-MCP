@@ -8,7 +8,7 @@ export const manageSchema = z.strictObject({
   action: z.enum(['list', 'add', 'update', 'remove', 'connect', 'disconnect', 'status']),
   target: z.string().min(1).optional().describe('Existing target name for update/remove/connect/disconnect/status.'),
   ...Object.fromEntries(Object.entries(targetFields).filter(([key]) => key !== 'port').map(([key, schema]) => [key, schema.optional()])),
-  port: targetFields.port.nullable().describe('SSH port; null clears an override on update.'),
+  port: targetFields.port.nullable().describe('SSH port; null clears an override on update, except that an inline port in the same ssh value wins.'),
   create: z.boolean().optional().describe('Create the remote root if missing. Default false.'),
 })
 

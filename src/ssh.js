@@ -813,8 +813,9 @@ const LINUX_TERMINALS = [
 ]
 
 /**
- * Open a temporary terminal that runs buildConnectCommand(target) and lets
- * the user answer ssh's password/passphrase prompt interactively.
+ * Open a temporary terminal that runs an arbitrary shell command line; used
+ * for OpenSSH authentication (buildConnectCommand) and for the sudo password
+ * prompt. The command receives no secret in argv.
  * @returns {Promise<{ok: true, terminal: string} | {ok: false, error: string}>}
  */
 export async function runInTerminal(command) {

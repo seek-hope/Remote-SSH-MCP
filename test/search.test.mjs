@@ -269,23 +269,35 @@ test('grep classifies non-regular and inaccessible roots without blocking', asyn
 test('glob bracket classes handle a literal ] and reject invalid ranges cleanly', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-class-'))
   try {
-    for (const name of ['].txt', 'a.txt', 'b.txt', 'y.txt', 'z.txt', '-.txt']) await writeFile(join(dir, name), '')
+    const names = ['].txt', '^.txt', '_.txt', '`.txt', '\\.txt', 'a.txt', 'b.txt', 'c.txt', 'y.txt', 'z.txt', '-.txt']
+    for (const name of names) await writeFile(join(dir, name), '')
     await mkdir(join(dir, 'top', 'sub'), { recursive: true })
     await writeFile(join(dir, 'top', 'sub', 'x'), '')
+    await mkdir(join(dir, 'top0sub'), { recursive: true })
+    await writeFile(join(dir, 'top0sub', 'x'), '')
+    const at = (...list) => list.map(name => join(dir, name)).sort()
     const run = (pattern) => {
       const parts = execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '100'], { encoding: 'utf8' }).split('\0')
       parts.pop()
       return parts.filter(Boolean).sort()
     }
-    assert.deepEqual(run('[]].txt'), [join(dir, '].txt')])
-    assert.deepEqual(run('[!]].txt'), [join(dir, 'a.txt'), join(dir, 'b.txt'), join(dir, 'y.txt'), join(dir, 'z.txt'), join(dir, '-.txt')].sort())
+    assert.deepEqual(run('[]].txt'), at('].txt'))
+    assert.deepEqual(run('[!]].txt'), at('a.txt', 'b.txt', 'c.txt', 'y.txt', 'z.txt', '-.txt', '^.txt', '_.txt', '`.txt', '\\.txt'))
     // A backslash-escaped '-' is a literal member, not a range endpoint.
-    assert.deepEqual(run('[a\\-z].txt'), [join(dir, '-.txt'), join(dir, 'a.txt'), join(dir, 'z.txt')].sort())
+    assert.deepEqual(run('[a\\-z].txt'), at('-.txt', 'a.txt', 'z.txt'))
     // ... and a backslash-escaped ']' does not close the class.
-    assert.deepEqual(run('[a\\]].txt'), [join(dir, '].txt'), join(dir, 'a.txt')].sort())
-    // Bracket classes never consume a path separator.
-    assert.deepEqual(run('top[!a]sub/x'), [])
+    assert.deepEqual(run('[a\\]].txt'), at('].txt', 'a.txt'))
+    // Class-special characters remain valid range endpoints.
+    assert.deepEqual(run('[]-a].txt'), at('].txt', '^.txt', '_.txt', '`.txt', 'a.txt'))
+    assert.deepEqual(run('[!]-a].txt'), at('-.txt', 'b.txt', 'c.txt', 'y.txt', 'z.txt', '\\.txt'))
+    assert.deepEqual(run('[--c].txt'), at('-.txt', '].txt', '^.txt', '_.txt', '`.txt', 'a.txt', 'b.txt', 'c.txt', '\\.txt'))
+    assert.deepEqual(run('[\\\\-a].txt'), at('].txt', '^.txt', '_.txt', '`.txt', 'a.txt', '\\.txt'))
+    // Bracket classes never consume a path separator, including a non-negated
+    // range whose interval contains '/'.
+    assert.deepEqual(run('top[!a]sub/x'), at('top0sub/x'))
+    assert.deepEqual(run('top[!0]sub/x'), [])
     assert.deepEqual(run('top[/]sub/x'), [])
+    assert.deepEqual(run('top[.-0]sub/x'), at('top0sub/x'))
     let failure
     try {
       execFileSync('python3', ['-c', GLOB_PY, '[z-a]', dir, '100'], { encoding: 'utf8' })
