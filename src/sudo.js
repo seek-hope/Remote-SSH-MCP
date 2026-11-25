@@ -223,6 +223,13 @@ async function promptForPassword(target, { promptTimeoutMs, signal }) {
       return { ok: false, error: `cannot open the local sudo password socket: ${error.message}` }
     }
 
+    // listen() creates the socket 0777 & ~umask; make it owner-only so a
+    // restrictive umask cannot leave the same-user client unable to connect.
+    try {
+      await chmod(socketPath, 0o600)
+    } catch (error) {
+      return { ok: false, error: `cannot secure the local sudo password socket: ${error.message}` }
+    }
     if (signal?.aborted) return abandoned
     const opened = await Promise.race([
       runInTerminal(buildSudoPromptScript({

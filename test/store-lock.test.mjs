@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withStoreLock, readTargetStoreStrict as readTargetStore, saveTargetStore, _lockTestHooks } from '../src/store.js'
 import { manageTargets } from '../src/manage.js'
-import { installFakeSsh } from './helpers.mjs'
+import { installFakeSsh, installLocalSsh } from './helpers.mjs'
 
 const STORE_URL = new URL('../src/store.js', import.meta.url).href
 const OWNER = 'owner'
@@ -891,6 +891,40 @@ test('a dangling symlink store parent fails immediately, not as a lock timeout',
     )
     assert.ok(Date.now() - started < 2000)
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('add verifies an executable root and creates it umask-safely', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-manage-root-'))
+  const store = join(dir, 'targets.json')
+  const ssh = await installLocalSsh()
+  const root = join(dir, 'nested', 'project')
+  try {
+    await writeFile(ssh.log, '')
+    const previous = process.umask(0o777)
+    try {
+      await manageTargets({ action: 'add', name: 't', ssh: 'h', root, create: true, controlPersist: 0 }, store)
+    } finally {
+      process.umask(previous)
+    }
+    assert.equal((await stat(root)).mode & 0o777, 0o700)
+
+    if (process.getuid?.() !== 0) {
+      const locked = join(dir, 'locked')
+      await mkdir(locked)
+      await chmod(locked, 0)
+      await assert.rejects(
+        manageTargets({ action: 'add', name: 'noexec', ssh: 'h', root: locked, controlPersist: 0 }, store),
+        /Cannot access/,
+      )
+      await assert.rejects(
+        manageTargets({ action: 'add', name: 'noexec-create', ssh: 'h', root: locked, create: true, controlPersist: 0 }, store),
+        /Cannot create/,
+      )
+    }
+  } finally {
+    await ssh.cleanup()
     await rm(dir, { recursive: true, force: true })
   }
 })

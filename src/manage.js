@@ -32,7 +32,12 @@ export async function readyTarget(target, signal) {
 
 async function verifyTarget(target, create, signal) {
   await readyTarget(target, signal)
-  const command = create ? `mkdir -p -- ${shq(target.root)}` : `test -d ${shq(target.root)}`
+  // Require search/execute access, not just existence: a 0000 root is unusable.
+  // Create missing components under umask 077 so a restrictive account umask
+  // cannot leave the new root unreadable.
+  const command = create
+    ? `umask 077; mkdir -p -- ${shq(target.root)} && test -x ${shq(target.root)}`
+    : `test -d ${shq(target.root)} && test -x ${shq(target.root)}`
   await sshExec({ target: target.ssh, port: target.port, controlPersist: target.controlPersist, command, signal, timeoutMs: 30_000 })
     .catch(error => {
       // An abort or a transport failure is not a missing root directory.
