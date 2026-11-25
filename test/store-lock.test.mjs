@@ -176,7 +176,7 @@ test('a lock with a LIVE valid pid is NEVER stolen for age alone', async () => {
     )
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-      /timed out.*lock/,
+      /timed out.*waiting for the lock /,
     )
     // The live holder's owner record was never touched by our failed acquisition.
     const rec = await readOwner(lockPath)
@@ -197,7 +197,7 @@ test('an EMPTY/invalid lock is only broken after the mtime grace (in-flight crea
   const lockPath = await seedLock(file, {}, { empty: true })
   await assert.rejects(
     () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 60_000, retryMs: 25 }),
-    /timed out.*lock/,
+    /timed out.*waiting for the lock /,
   )
   await assert.rejects(() => readFile(join(lockPath, OWNER), 'utf8'), /ENOENT/, 'fresh empty lock left untouched (still empty)')
   // Once the same empty lock ages past the grace, it is recovered.
@@ -243,7 +243,7 @@ test('a stale recovery cannot delete or move a FRESH SUCCESSOR lock', async () =
     try {
       await assert.rejects(
         () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 600, graceMs: 100, retryMs: 25 }),
-        /timed out.*lock/,
+        /timed out.*waiting for the lock /,
         'the contender must wait on the fresh successor, not steal it',
       )
     } finally {
@@ -313,7 +313,7 @@ test('a LIVE foreign lock times out (bounded wait), stays intact, and works agai
     const lockPath = await seedLock(file, { token: 'foreign.holder', pid: foreign.pid, at: new Date().toISOString() })
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 300, graceMs: 60_000, retryMs: 25 }),
-      /timed out.*lock/,
+      /timed out.*waiting for the lock /,
     )
     // The live holder's lock was never destroyed by our failed acquisition.
     const rec = await readOwner(lockPath)
@@ -374,7 +374,7 @@ test('a recovery GATE whose recorded pid is LIVE is never stolen for age alone',
     )
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-      /timed out.*lock/,
+      /timed out.*waiting for the lock /,
     )
     const rec = await readOwner(gatePath)
     assert.equal(rec.token, 'wedged.recoverer', 'the live recoverer\'s gate was never touched')
@@ -398,7 +398,7 @@ test('an OWNERLESS recovery gate gets its grace; once aged it is taken over', as
   const gatePath = await seedGate(file, {}, { empty: true })
   await assert.rejects(
     () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-    /timed out.*lock/,
+    /timed out.*waiting for the lock /,
   )
   await assert.rejects(() => readFile(join(gatePath, OWNER), 'utf8'), /ENOENT/, 'fresh ownerless gate left untouched')
   // Once it ages past GATE_STALE_MS, it is taken over and the stale lock
@@ -444,7 +444,7 @@ test('GATE release is token-checked: a foreign gate survives our recovery', asyn
   try {
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 600, graceMs: 100, retryMs: 25 }),
-      /timed out.*lock/,
+      /timed out.*waiting for the lock /,
       'the contender must back off behind the live foreign gate',
     )
   } finally {
@@ -469,7 +469,7 @@ test('an acquirer backs off BEFORE creating the lock while a live gate stands', 
     await seedGate(file, { token: 'busy.recoverer', pid: foreign.pid })
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-      /timed out.*lock/,
+      /timed out.*waiting for the lock /,
     )
     const names = await readdir(dir)
     assert.ok(!names.includes('targets.json.lock'), 'no lock was created under a live recovery gate')
@@ -526,7 +526,7 @@ test('a WEDGED live gate bounds even a verified acquisition (own verified lock g
   try {
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 500, graceMs: 1000, retryMs: 20 }),
-      /timed out.*lock/,
+      /timed out.*waiting for the lock /,
     )
   } finally {
     delete _lockTestHooks.writeOwner

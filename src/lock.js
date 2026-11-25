@@ -56,8 +56,8 @@ const storeQueues = new Map()
 
 /** Positive integer from an env var, or the fallback. Test/ops tuning knob. */
 function numEnv(name, fallback) {
-  const v = Number.parseInt(process.env[name], 10)
-  return Number.isFinite(v) && v > 0 ? v : fallback
+  const v = Number(process.env[name])
+  return Number.isSafeInteger(v) && v > 0 ? v : fallback
 }
 
 /**
@@ -139,8 +139,17 @@ function pidAlive(pid) {
       const rest = raw.slice(raw.lastIndexOf(')') + 2).trim()
       if (rest[0] === 'Z' || rest[0] === 'X') return false
     } catch (e) {
-      if (e?.code === 'ENOENT' || e?.code === 'ESRCH') return false
-      // EACCES/hidepid: keep the conservative signal-0 verdict.
+      if (e?.code === 'ENOENT' || e?.code === 'ESRCH') {
+        // hidepid=2 returns ENOENT for a live, non-traceable process. Re-probe
+        // signal 0: only ESRCH proves it died since the first probe.
+        try {
+          process.kill(pid, 0)
+          return true
+        } catch (again) {
+          return again?.code === 'EPERM'
+        }
+      }
+      // EACCES or another procfs error: keep the conservative verdict.
     }
   }
   return true

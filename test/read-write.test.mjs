@@ -241,6 +241,23 @@ test('bash caps foreground stdout at 512 KiB and flags truncation', async () => 
   }
 })
 
+test('bash does not flag exactly 512 KiB of stdout as truncated', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_BIG = String(512 * 1024)
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    const bash = makeBashTool({ ssh: 'h', name: 'fixture', root: '/', controlPersist: 0 })
+    const out = await bash.execute({ command: 'true' }, {})
+    assert.doesNotMatch(out, /stdout truncated/)
+    const body = out.slice(0, out.lastIndexOf('\n[exit code:'))
+    assert.equal(body.length, 512 * 1024)
+  } finally {
+    delete process.env.FAKE_SSH_BIG
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+})
+
 test('bash rejects NUL and unpaired surrogates in commands and workdir', async () => {
   const bash = makeBashTool({ ssh: 'offline', name: 'fixture', root: '/', controlPersist: 0 })
   const signal = new AbortController().signal

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { connectTimeoutMs, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
+import { installLocalSsh } from './helpers.mjs'
 import { parseTargets } from '../src/target.js'
 import { setCachedSudoPassword, sudoCacheKey, sudoCacheSize } from '../src/sudocache.js'
 import { installFakeSsh } from './helpers.mjs'
@@ -76,6 +77,33 @@ test('sshRun wipes a caller-provided stdin buffer when asked', async () => {
     await fake.cleanup()
   }
   assert.equal(secret.every((byte) => byte === 0), true, 'the wire copy is wiped after stdin is accepted')
+})
+
+test('a complete exit marker wins over a descendant-held channel timeout', async () => {
+  const ssh = await installLocalSsh()
+  try {
+    const result = await sshRun({ target: 'h', command: 'sleep 2 & echo done', controlPersist: 0, timeoutMs: 300 })
+    assert.equal(result.timedOut, false, 'the foreground command already finished')
+    assert.equal(result.code, 0)
+    assert.equal(result.stdout, 'done')
+    assert.doesNotMatch(result.stdout, /__REMOTE_SSH_EXIT_/)
+  } finally {
+    await ssh.cleanup()
+  }
+})
+
+test('wipeStdin wipes a large buffer even when the child never consumes it', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_MARK = '0'
+  const secret = Buffer.alloc(4 * 1024 * 1024, 0x41)
+  try {
+    const result = await sshRun({ target: 'h', command: 'true', stdin: secret, wipeStdin: true, timeoutMs: 5000 })
+    assert.equal(result.code, 0)
+    assert.equal(secret.every((byte) => byte === 0), true, 'the caller copy is wiped after an unconsumed/EPIPE stdin')
+  } finally {
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
 })
 
 test('a command over the single-argument limit is rejected before spawning ssh', async () => {
@@ -177,8 +205,8 @@ test('a host-key phrase in the stderr head is found despite a stderr flood', asy
   process.env.FAKE_SSH_EXIT = '255'
   setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
   try {
-    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /exit 255/)
-    assert.equal(sudoCacheSize(), 0, 'the phrase in the retained head is detected')
+    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /exit 255.*host key verification failed/is)
+    assert.equal(sudoCacheSize(), 0, 'the phrase in the retained head is detected and reported')
   } finally {
     delete process.env.FAKE_SSH_HEAD_STDERR
     delete process.env.FAKE_SSH_BIG_ERR
@@ -215,14 +243,13 @@ test('a host-key failure clears the destination sudo cache', async () => {
 
 test('sshRun timeout settles even when a local descendant holds stderr', async () => {
   const fake = await installFakeSsh()
-  process.env.FAKE_SSH_MARK = '0'
   process.env.FAKE_SSH_HOLD_STDERR = '1'
   const started = Date.now()
   try {
     const result = await sshRun({ target: 'h', command: 'true', timeoutMs: 300 })
     assert.equal(result.timedOut, true)
+    assert.equal(result.code, null)
   } finally {
-    delete process.env.FAKE_SSH_MARK
     delete process.env.FAKE_SSH_HOLD_STDERR
     await fake.cleanup()
   }

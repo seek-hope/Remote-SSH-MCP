@@ -108,7 +108,7 @@ export function buildSudoPromptScript({ socket, prompt, promptTimeoutSeconds, no
 /** Strip control, zero-width and bidi characters from text shown in a terminal. */
 function promptText(value, limit) {
   const text = String(value)
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '?')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2028\u2029\u2060-\u2069\ufeff]/g, '?')
   if (text.length <= limit) return text
   let cut = limit
   const last = text.charCodeAt(cut - 1)

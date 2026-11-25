@@ -320,10 +320,16 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wip
       try { child.stdout?.destroy() } catch { /* already closed */ }
       try { child.stderr?.destroy() } catch { /* already closed */ }
     }
+    const wipeStdinNow = () => {
+      if (wipeStdin && Buffer.isBuffer(stdin)) stdin.fill(0)
+    }
     const finish = (fn, val) => {
       if (settled) return
       settled = true
       cleanup()
+      // Also covers an early child exit/EPIPE where stdin never emitted
+      // 'finish'; at this point no further bytes will be written.
+      wipeStdinNow()
       fn(val)
     }
     const onAbort = () => { kill(); releasePipes(); finish(reject, new Error('aborted')) }
@@ -367,7 +373,7 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wip
       child.stdin.on('error', () => {}) // remote closed early; close event reports it
       // Wipe a caller-owned secret as soon as the bytes are handed to the OS,
       // instead of keeping it for the whole remote command lifetime.
-      if (wipeStdin && Buffer.isBuffer(stdin)) child.stdin.once('finish', () => stdin.fill(0))
+      if (wipeStdin && Buffer.isBuffer(stdin)) child.stdin.once('finish', wipeStdinNow)
       child.stdin.end(stdin)
     } else {
       child.stdin.end()
@@ -418,8 +424,9 @@ export async function sshExec(opts) {
         // may exit 1..254 (or print the phrase itself) without a host-key
         // problem. Scan the head as well as the tail so a stderr flood after
         // the host-key line does not hide it.
+        const hostKey = HOST_KEY_RE.test(`${stderrHead}\n${stderr}`)
         if (transportCode === 255) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
-        const tail = stderr.trim().split('\n').slice(-5).join('\n')
+        const tail = hostKey ? 'host key verification failed' : stderr.trim().split('\n').slice(-5).join('\n')
         return settle.reject(new Error(`remote command failed (exit ${transportCode}): ${tail || '(no stderr)'}`))
       }
       const out = Buffer.concat(outChunks)
@@ -463,32 +470,60 @@ export async function sshRun(opts) {
   // command output can never spoof the transport's exit-code line.
   const wrapped = `( ${command}\n); __rc=$?; echo "${MARK}\${__rc}"`
   const spec = await sshSpawn(opts, wrapped)
+  // Reserve room for the exit marker outside the caller's stdout budget.
+  const rawStdoutCap = maxStdout + MARK.length + 16
   // No onTimeout: a local timeout only kills the child and lets `close`
   // resolve with timedOut:true (sshRun reports timeouts as data).
   return runSshChild(spec, {
-    stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin,
+    stdin, signal, timeoutMs, maxStdout: rawStdoutCap, maxStderr, wipeStdin,
     onClose: ({ transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, errTotal, settle }) => {
       if (settled) return
-      let stdout = Buffer.concat(outChunks).toString('utf8')
+      const stdout = Buffer.concat(outChunks).toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
-      const truncated = { stdoutTruncated: outTotal > maxStdout, stderrTruncated: errTotal > maxStderr }
+      // The wrapper prints the marker after the command; a descendant may
+      // hold the channel open past the local timeout, but a complete marker
+      // already proves the command finished with that code.
+      const idx = stdout.lastIndexOf(MARK)
+      let markerCode
+      let markerBytes = 0
+      if (idx !== -1) {
+        const end = stdout.indexOf('\n', idx)
+        const text = end === -1 ? '' : stdout.slice(idx + MARK.length, end).trim()
+        if (/^\d+$/.test(text)) {
+          markerCode = Number(text)
+          markerBytes = Buffer.byteLength(stdout.slice(idx, end + 1))
+        }
+      }
+      const capTail = (text) => {
+        const bytes = Buffer.from(text, 'utf8')
+        if (bytes.length <= maxStdout) return text
+        return bytes.subarray(bytes.length - maxStdout).toString('utf8')
+      }
+      const commandOutput = capTail(idx === -1 ? stdout : stdout.slice(0, idx).replace(/\n$/, ''))
+      const truncated = {
+        stdoutTruncated: outTotal - markerBytes > maxStdout,
+        stderrTruncated: errTotal > maxStderr,
+      }
       if (timedOut) {
-        return settle.resolve({ code: null, stdout, stderr, stderrHead, timedOut: true, ...truncated })
+        if (markerCode !== undefined) {
+          return settle.resolve({ code: markerCode, stdout: commandOutput, stderr, stderrHead, timedOut: false, ...truncated })
+        }
+        return settle.resolve({ code: null, stdout: commandOutput, stderr, stderrHead, timedOut: true, ...truncated })
       }
       if (transportCode !== 0) {
         // Only ssh's own 255 is a client/transport failure; a remote command's
         // nonzero exit or its own stderr phrase is not a host-key problem.
+        const hostKey = HOST_KEY_RE.test(`${stderrHead}\n${stderr}`)
         if (transportCode === 255) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
-        return settle.reject(new Error(`ssh transport failed (exit ${transportCode}): ${stderr.trim().split('\n').slice(-3).join('\n')}`))
+        const detail = hostKey ? 'host key verification failed' : stderr.trim().split('\n').slice(-3).join('\n')
+        return settle.reject(new Error(`ssh transport failed (exit ${transportCode}): ${detail || '(no stderr)'}`))
       }
-      const idx = stdout.lastIndexOf(MARK)
-      if (idx === -1) {
-        return settle.reject(new Error(`remote run ended without exit marker: ${stdout.slice(-200)}`))
+      if (markerCode === undefined) {
+        const tail = commandOutput.slice(-200) || stdout.slice(-200)
+        return settle.reject(new Error(`remote run ended without exit marker: ${tail}`))
       }
-      const code = parseInt(stdout.slice(idx + MARK.length).trim(), 10)
-      stdout = stdout.slice(0, idx).replace(/\n$/, '')
-      settle.resolve({ code: Number.isFinite(code) ? code : null, stdout, stderr, stderrHead, ...truncated })
+      settle.resolve({ code: markerCode, stdout: commandOutput, stderr, stderrHead, ...truncated })
     },
   })
 }

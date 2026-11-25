@@ -266,6 +266,23 @@ test('grep classifies non-regular and inaccessible roots without blocking', asyn
   }
 })
 
+test('glob rejects a pattern with too many ** segments', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-complex-'))
+  try {
+    let failure
+    try {
+      execFileSync('python3', ['-c', GLOB_PY, '**/'.repeat(5) + 'x', dir, '10'], { encoding: 'utf8' })
+    } catch (error) {
+      failure = error
+    }
+    assert.ok(failure)
+    assert.match(String(failure.stderr), /__REMOTE_SSH_ERR__:too-complex/)
+    assert.doesNotMatch(String(failure.stderr), /Traceback/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('glob bracket classes handle a literal ] and reject invalid ranges cleanly', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-class-'))
   try {

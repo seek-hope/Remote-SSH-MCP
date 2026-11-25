@@ -25,6 +25,12 @@ import heapq, os, re, stat, sys
 
 pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
+# Each **/ becomes an ambiguous optional prefix in the regex; many of them
+# cause exponential backtracking on a long non-matching path.
+if pattern.count('**') > 4:
+    sys.stderr.write('__REMOTE_SSH_ERR__:too-complex\n')
+    sys.exit(2)
+
 # A glob bracket expression must not match '/', and a backslash inside it
 # escapes the next character (it is not itself a member). Ranges are emitted
 # only for safe single-character endpoints so a literal '-' cannot turn into
@@ -208,7 +214,7 @@ sys.stdout.buffer.flush()
 export function makeGlobTool(target, cwd = target.root) {
   return defTextTool({
     name: 'glob',
-    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in newest-modification-first order, up to ${GLOB_CAP} paths. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/.svn/.hg/node_modules directories are skipped.`,
+    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in newest-modification-first order, up to ${GLOB_CAP} paths. Patterns may contain at most four ** segments. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/.svn/.hg/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {
@@ -232,6 +238,7 @@ export function makeGlobTool(target, cwd = target.root) {
         if (r.stderr.includes('__REMOTE_SSH_ERR__:not-a-dir')) throw new Error(`glob: not a directory on ${target.name}: ${root}`)
         if (r.stderr.includes('__REMOTE_SSH_ERR__:permission')) throw new Error(`glob: permission denied on ${target.name}: ${root}`)
         if (r.stderr.includes('__REMOTE_SSH_ERR__:bad-pattern')) throw new Error(`glob: invalid pattern: ${a.pattern}`)
+        if (r.stderr.includes('__REMOTE_SSH_ERR__:too-complex')) throw new Error('glob: pattern has too many ** segments (maximum 4); simplify it or use grep')
         throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       }
       if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
