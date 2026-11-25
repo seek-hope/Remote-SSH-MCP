@@ -37,6 +37,7 @@
  */
 
 import { readFile, writeFile, rename, rm, mkdir, stat, readdir } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -60,10 +61,9 @@ function numEnv(name, fallback) {
 }
 
 /**
- * Lock tuning for one withStoreLock call. Defaults: the acquire wait
- * (timeoutMs) must cover the worst legal in-lock work — an update's ssh
- * verification is 25s + 25s probes plus a 30s remote mkdir (~80s), so the
- * default sits well above it at 150s. graceMs is the mtime grace that
+ * Lock tuning for one withStoreLock call. timeoutMs must cover the longest
+ * legal in-lock work: store mutations are short, while the ControlMaster
+ * warm-up passes its own 200s budget. graceMs is the mtime grace that
  * protects an empty/in-flight lock create from being broken too early.
  */
 function lockOpts(opts = {}) {
@@ -120,17 +120,30 @@ async function cleanStaleStaging(path, graceMs) {
  */
 export const _lockTestHooks = {}
 
-/** Liveness probe for a pid (signal 0 checks existence only). */
+/**
+ * Liveness probe for a pid. signal 0 sees zombies as alive, so on Linux a
+ * Z/X state is treated as dead: a zombie can never release the lock itself.
+ */
 function pidAlive(pid) {
   // pid 0 signals the caller's own process group; it is never a valid owner.
   if (!Number.isInteger(pid) || pid <= 0) return false
   if (pid === process.pid) return true
   try {
     process.kill(pid, 0)
-    return true
   } catch (e) {
-    return e?.code === 'EPERM' // exists but owned by someone else
+    if (e?.code !== 'EPERM') return false // ESRCH etc.
   }
+  if (process.platform === 'linux') {
+    try {
+      const raw = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const rest = raw.slice(raw.lastIndexOf(')') + 2).trim()
+      if (rest[0] === 'Z' || rest[0] === 'X') return false
+    } catch (e) {
+      if (e?.code === 'ENOENT' || e?.code === 'ESRCH') return false
+      // EACCES/hidepid: keep the conservative signal-0 verdict.
+    }
+  }
+  return true
 }
 
 function ownerRecord(token) {
@@ -306,7 +319,7 @@ async function acquireStoreLock(file, opts) {
   const gatePath = gatePathFor(file)
   const token = `${process.pid}.${randomUUID()}`
   const deadline = Date.now() + opts.timeoutMs
-  const timedOut = () => new Error(`timed out after ${opts.timeoutMs}ms waiting for the target-store lock ${lockPath} (held by another process)`)
+  const timedOut = () => new Error(`timed out after ${opts.timeoutMs}ms waiting for the lock ${lockPath} (held by another process)`)
   for (;;) {
     if (opts.signal?.aborted) throw new Error('aborted')
     let created = false

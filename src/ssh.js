@@ -8,18 +8,16 @@
  * calls still use BatchMode.
  */
 
-import { spawn, execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { chmod, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { promisify } from 'node:util'
 import { StringDecoder } from 'node:string_decoder'
 import { effectiveControlPersist } from './target.js'
 import { clearCachedSudoPassword, sudoCacheKey } from './sudocache.js'
 import { withStoreLock } from './store.js'
 
-const execFileAsync = promisify(execFile)
 
 /** ControlMaster socket directory (0700 — OpenSSH rejects a shared dir). */
 const controlDir = () => resolve(process.env.REMOTE_SSH_CONTROL_DIR || join(homedir(), '.cache', 'remote-ssh', 'control'))
@@ -174,74 +172,9 @@ function completeSshIdentity(out) {
 export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
   try {
     const spec = await sshSpawn({ target: target.ssh, port: target.port, controlPersist: 0 }, 'true')
-    // stdin must be /dev/null: ssh -G does not read it, and a test/alternate
-    // ssh binary that proxies stdin would otherwise block. Detach so a
-    // `Match exec` grandchild can be killed with the process group.
-    const stdout = await new Promise((resolve, reject) => {
-      const child = spawn(spec.command, ['-G', ...spec.args], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: process.platform !== 'win32',
-      })
-      let out = ''
-      let outBytes = 0
-      let err = ''
-      // Preserve multi-byte characters split across pipe chunks.
-      const outDecoder = new StringDecoder('utf8')
-      const errDecoder = new StringDecoder('utf8')
-      let settled = false
-      let timer
-      const killTree = () => {
-        try {
-          if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL')
-          else child.kill('SIGKILL')
-        } catch {
-          try { child.kill('SIGKILL') } catch { /* gone */ }
-        }
-      }
-      const finish = (fn, value) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        // Drop listeners/streams so a Match exec child that outlives the
-        // timeout cannot keep appending to an abandoned buffer.
-        child.stdout?.removeAllListeners()
-        child.stderr?.removeAllListeners()
-        child.stdout?.destroy()
-        child.stderr?.destroy()
-        fn(value)
-      }
-      timer = setTimeout(() => {
-        killTree()
-        // A descendant may hold the pipes after a complete -G output; keep the
-        // identity instead of discarding it. Every field must be complete and
-        // newline-terminated.
-        if (completeSshIdentity(out)) {
-          finish(resolve, out)
-          return
-        }
-        finish(reject, new Error('ssh -G timed out'))
-      }, Math.max(1, Math.min(timeoutMs, 5000)))
-      child.stdout.on('data', (chunk) => {
-        if (settled) return
-        outBytes += chunk.length
-        out += outDecoder.write(chunk)
-        if (outBytes > 512 * 1024) {
-          killTree()
-          finish(reject, new Error('ssh -G output too large'))
-        }
-      })
-      child.stderr.on('data', (chunk) => {
-        if (settled) return
-        err = (err + errDecoder.write(chunk)).slice(-4096)
-      })
-      child.on('error', (error) => finish(reject, error))
-      child.on('close', (code) => {
-        if (!settled) {
-          out += outDecoder.end()
-          err += errDecoder.end()
-        }
-        finish(code === 0 ? resolve : reject, code === 0 ? out : new Error(err.trim() || `ssh -G exited ${code}`))
-      })
+    const stdout = await runSshG(spec, {
+      timeoutMs: Math.min(timeoutMs, 5000),
+      accept: completeSshIdentity,
     })
     if (!completeSshIdentity(stdout)) return undefined
     const pick = (name) => (stdout.match(new RegExp(`^${name} (.+)$`, 'm'))?.[1] ?? '').trim()
@@ -251,6 +184,79 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Run `ssh -G` with stdin ignored, a detached process group, and a bounded
+ * buffer. `accept(out)` decides whether a complete answer already arrived when
+ * the deadline fires, so a descendant holding the pipes cannot force a false
+ * timeout. Resolves with the collected output; rejects on a bad exit or a
+ * timeout without an acceptable answer.
+ */
+async function runSshG(spec, { timeoutMs, accept }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(spec.command, ['-G', ...spec.args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    })
+    let out = ''
+    let outBytes = 0
+    let err = ''
+    // Preserve multi-byte characters split across pipe chunks.
+    const outDecoder = new StringDecoder('utf8')
+    const errDecoder = new StringDecoder('utf8')
+    let settled = false
+    let timer
+    const killTree = () => {
+      try {
+        if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL')
+        else child.kill('SIGKILL')
+      } catch {
+        try { child.kill('SIGKILL') } catch { /* gone */ }
+      }
+    }
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      // Drop listeners/streams so a Match exec child that outlives the
+      // timeout cannot keep appending to an abandoned buffer.
+      child.stdout?.removeAllListeners()
+      child.stderr?.removeAllListeners()
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      fn(value)
+    }
+    timer = setTimeout(() => {
+      killTree()
+      if (accept(out)) {
+        finish(resolve, out)
+        return
+      }
+      finish(reject, new Error('ssh -G timed out'))
+    }, Math.max(1, timeoutMs))
+    child.stdout.on('data', (chunk) => {
+      if (settled) return
+      outBytes += chunk.length
+      out += outDecoder.write(chunk)
+      if (outBytes > 512 * 1024) {
+        killTree()
+        finish(reject, new Error('ssh -G output too large'))
+      }
+    })
+    child.stderr.on('data', (chunk) => {
+      if (settled) return
+      err = (err + errDecoder.write(chunk)).slice(-4096)
+    })
+    child.on('error', (error) => finish(reject, error))
+    child.on('close', (code) => {
+      if (!settled) {
+        out += outDecoder.end()
+        err += errDecoder.end()
+      }
+      finish(code === 0 ? resolve : reject, code === 0 ? out : new Error(err.trim() || `ssh -G exited ${code}`))
+    })
+  })
 }
 
 /**
@@ -437,7 +443,9 @@ export async function sshExec(opts) {
  *
  * @param {object} opts same as sshExec, plus
  * @param {number} [opts.maxStderr] cap collected stderr bytes (tail kept), default 64 KiB
- * @returns {Promise<{ code: number|null, stdout: string, stderr: string, timedOut?: boolean }>}
+ * @returns {Promise<{ code: number|null, stdout: string, stderr: string,
+ *   stderrHead: string, timedOut?: boolean, stdoutTruncated?: boolean,
+ *   stderrTruncated?: boolean }>}
  */
 export async function sshRun(opts) {
   const {
@@ -533,7 +541,10 @@ async function warmControlMaster(target, options) {
   // Let OpenSSH resolve aliases, users, ports and ProxyJump exactly as it does
   // for a real command. All MCP processes sharing this socket share its lock.
   const spec = await sshSpawn({ target: target.ssh, port: target.port, controlPersist: target.controlPersist }, 'true')
-  const { stdout } = await execFileAsync(spec.command, ['-G', ...spec.args], { timeout: 10_000, maxBuffer: 512 * 1024 })
+  const stdout = await runSshG(spec, {
+    timeoutMs: 10_000,
+    accept: (out) => /^controlpath .+\r?\n/m.test(out),
+  })
   // Require a complete line: a truncated clean-close answer must not become a
   // lock key that differs from sshControl's own ControlPath expansion.
   const socket = stdout.match(/^controlpath (.+)\r?\n/m)?.[1].trim()
@@ -685,11 +696,9 @@ async function establishControlMaster(target, { interactive }) {
   // Only an authentication-shaped failure is worth a terminal: popping a
   // window for a dead host or a bad ssh alias would be noise.
   const authHint = /permission denied|publickey|password|passphrase|authentication|no supported authentication|host key verification failed/i
-  // A changed host identity must not keep a sudo password cached for the old
-  // host; the user has to accept the key first and then re-enter the password.
-  if (/host key verification failed|remote host identification has changed/i.test(headlessError)) {
-    clearCachedSudoPassword(sudoCacheKey(target))
-  }
+  // sshExec already clears the cache on a genuine ssh-255 host-key failure;
+  // matching the error text here would also catch a remote exit 1 that merely
+  // mentions the phrase.
   if (!interactive || !authHint.test(headlessError)) {
     return {
       ok: false,

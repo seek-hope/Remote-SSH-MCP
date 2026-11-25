@@ -56,6 +56,10 @@ test('the sudo prompt deduplicates a default name and labels IPv6 ports unambigu
     sudoPasswordPrompt({ name: 'gpu', ssh: 'user@::1', port: 2222 }),
     'sudo password for gpu (user@::1 (port 2222)): ',
   )
+  const long = sudoPasswordPrompt({ name: 'h', ssh: 'x'.repeat(150), port: 2222 })
+  assert.match(long, /\(port 2222\)/, 'the port survives a truncated destination')
+  const split = sudoPasswordPrompt({ name: '😀'.repeat(39) + 'x' + '😀', ssh: 'h' })
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(split), 'no lone high surrogate at the cut')
 })
 
 test('the terminal prompt reads the password silently and delivers it over the private socket', () => {
@@ -529,6 +533,23 @@ test('a changed resolved SSH identity drops the cached credential', async () => 
     if (previous === undefined) delete process.env.FAKE_SSH_IDENTITY_HOST
     else process.env.FAKE_SSH_IDENTITY_HOST = previous
     await h.cleanup()
+  }
+})
+
+test('a non-255 transport failure mentioning host keys does not clear the cache', async () => {
+  const fake = await installFakeSsh()
+  setCachedSudoPassword(key, Buffer.from('x'))
+  process.env.FAKE_SSH_EXIT = '1'
+  process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
+  try {
+    const result = await run()
+    assert.equal(result.ok, false)
+    assert.match(result.error, /exit 1/)
+    assert.equal(sudoCacheSize(), 1, 'text alone does not prove a host-key failure')
+  } finally {
+    delete process.env.FAKE_SSH_EXIT
+    delete process.env.FAKE_SSH_STDERR
+    await fake.cleanup()
   }
 })
 

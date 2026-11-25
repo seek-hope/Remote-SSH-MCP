@@ -33,6 +33,14 @@ if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE === 'split-utf8') {
     Buffer.from([0xc3, 0xa9]),
     Buffer.from('r\\nport 22\\n', 'utf8'),
   ]))
+} else if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE === 'controlpath-stdin') {
+  // Blocks until stdin is closed/ignored; verifies the -G probe ignores stdin.
+  try { fs.readFileSync(0) } catch {}
+  fs.writeSync(1, 'controlpath ' + (process.env.FAKE_SSH_CONTROL_PATH || '/tmp/remote-ssh-cp') + '\\n')
+  process.exit(0)
+} else if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE === 'controlpath-ok') {
+  fs.writeSync(1, 'controlpath ' + (process.env.FAKE_SSH_CONTROL_PATH || '/tmp/remote-ssh-cp') + '\\n')
+  process.exit(0)
 } else if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE === 'controlpath-truncated') {
   // A clean close with a controlpath line lacking its terminating newline.
   fs.writeSync(1, 'controlpath /tmp/remote-ssh-truncated')
@@ -106,6 +114,7 @@ if (process.env.FAKE_SSH_MARK) {
   const marker = wrapped.match(/__REMOTE_SSH_EXIT_[0-9a-f-]+__/)?.[0] || '__REMOTE_SSH_EXIT__'
   fs.writeSync(1, marker + process.env.FAKE_SSH_MARK + '\\n')
 }
+if (process.env.FAKE_SSH_HEAD_STDERR) fs.writeSync(2, process.env.FAKE_SSH_HEAD_STDERR)
 const bigErr = Number(process.env.FAKE_SSH_BIG_ERR || '0')
 if (bigErr > 0) {
   const chunk = Buffer.alloc(65536, 0x45)

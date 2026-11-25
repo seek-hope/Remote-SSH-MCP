@@ -50,7 +50,6 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { resolveSshIdentity, sshRun, shq, runInTerminal } from './ssh.js'
 import {
-  clearCachedSudoPassword,
   dropCachedSudoPassword,
   getCachedSudoPasswordEntry,
   setCachedSudoPassword,
@@ -70,7 +69,6 @@ const DRAIN_TIMEOUT_SECONDS = 5
 const POLICY_RE = /not in the sudoers file|not allowed to execute|command not allowed|no tty present|a terminal is required|must have a tty|requiretty|no askpass program/i
 /** The remote shell could not find sudo itself. */
 const SETUP_RE = /(?:^|\n)(?:sh|bash): (?:sudo: )?(?:command )?not found|sudo: (?:command )?not found/i
-const HOST_KEY_RE = /host key verification failed|remote host identification has changed/i
 
 /**
  * Node client run inside the terminal to hand the password to this process.
@@ -109,9 +107,13 @@ export function buildSudoPromptScript({ socket, prompt, promptTimeoutSeconds, no
 
 /** Strip control, zero-width and bidi characters from text shown in a terminal. */
 function promptText(value, limit) {
-  return String(value)
+  const text = String(value)
     .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '?')
-    .slice(0, limit)
+  if (text.length <= limit) return text
+  let cut = limit
+  const last = text.charCodeAt(cut - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1
+  return text.slice(0, cut)
 }
 
 /** Parse `OK\n<password>` / `ERR\n` from the terminal's socket payload. */
@@ -388,8 +390,9 @@ async function obtainPassword(target, { ttlMs, promptTimeoutMs, identity, signal
  * when the name defaults to the destination.
  */
 export function sudoPasswordPrompt(target) {
-  const dest = target.port !== undefined ? `${target.ssh} (port ${target.port})` : target.ssh
-  const where = promptText(dest, 120)
+  // Leave room for the port label so a long destination cannot truncate it.
+  const base = promptText(target.ssh, 100)
+  const where = target.port !== undefined ? `${base} (port ${target.port})` : base
   return target.name === target.ssh
     ? `sudo password for ${where}: `
     : `sudo password for ${promptText(target.name, 80)} (${where}): `
@@ -540,9 +543,9 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
       maxStderr: 64 * 1024,
     })
   } catch (error) {
-    const message = error?.message ?? String(error)
-    if (HOST_KEY_RE.test(message)) clearCachedSudoPassword(sudoCacheKey(target))
-    return { ok: false, error: message }
+    // sshRun clears the cache itself on a genuine ssh-255 host-key failure;
+    // text matching here would also catch a remote exit code that mentions it.
+    return { ok: false, error: error?.message ?? String(error) }
   } finally {
     input?.fill(0)
   }

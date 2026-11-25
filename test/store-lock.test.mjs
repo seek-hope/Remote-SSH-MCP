@@ -176,7 +176,7 @@ test('a lock with a LIVE valid pid is NEVER stolen for age alone', async () => {
     )
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-      /timed out.*target-store lock/,
+      /timed out.*lock/,
     )
     // The live holder's owner record was never touched by our failed acquisition.
     const rec = await readOwner(lockPath)
@@ -197,7 +197,7 @@ test('an EMPTY/invalid lock is only broken after the mtime grace (in-flight crea
   const lockPath = await seedLock(file, {}, { empty: true })
   await assert.rejects(
     () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 60_000, retryMs: 25 }),
-    /timed out.*target-store lock/,
+    /timed out.*lock/,
   )
   await assert.rejects(() => readFile(join(lockPath, OWNER), 'utf8'), /ENOENT/, 'fresh empty lock left untouched (still empty)')
   // Once the same empty lock ages past the grace, it is recovered.
@@ -243,7 +243,7 @@ test('a stale recovery cannot delete or move a FRESH SUCCESSOR lock', async () =
     try {
       await assert.rejects(
         () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 600, graceMs: 100, retryMs: 25 }),
-        /timed out.*target-store lock/,
+        /timed out.*lock/,
         'the contender must wait on the fresh successor, not steal it',
       )
     } finally {
@@ -313,7 +313,7 @@ test('a LIVE foreign lock times out (bounded wait), stays intact, and works agai
     const lockPath = await seedLock(file, { token: 'foreign.holder', pid: foreign.pid, at: new Date().toISOString() })
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 300, graceMs: 60_000, retryMs: 25 }),
-      /timed out.*target-store lock/,
+      /timed out.*lock/,
     )
     // The live holder's lock was never destroyed by our failed acquisition.
     const rec = await readOwner(lockPath)
@@ -374,7 +374,7 @@ test('a recovery GATE whose recorded pid is LIVE is never stolen for age alone',
     )
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-      /timed out.*target-store lock/,
+      /timed out.*lock/,
     )
     const rec = await readOwner(gatePath)
     assert.equal(rec.token, 'wedged.recoverer', 'the live recoverer\'s gate was never touched')
@@ -398,7 +398,7 @@ test('an OWNERLESS recovery gate gets its grace; once aged it is taken over', as
   const gatePath = await seedGate(file, {}, { empty: true })
   await assert.rejects(
     () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-    /timed out.*target-store lock/,
+    /timed out.*lock/,
   )
   await assert.rejects(() => readFile(join(gatePath, OWNER), 'utf8'), /ENOENT/, 'fresh ownerless gate left untouched')
   // Once it ages past GATE_STALE_MS, it is taken over and the stale lock
@@ -444,7 +444,7 @@ test('GATE release is token-checked: a foreign gate survives our recovery', asyn
   try {
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 600, graceMs: 100, retryMs: 25 }),
-      /timed out.*target-store lock/,
+      /timed out.*lock/,
       'the contender must back off behind the live foreign gate',
     )
   } finally {
@@ -469,7 +469,7 @@ test('an acquirer backs off BEFORE creating the lock while a live gate stands', 
     await seedGate(file, { token: 'busy.recoverer', pid: foreign.pid })
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 400, graceMs: 100, retryMs: 25 }),
-      /timed out.*target-store lock/,
+      /timed out.*lock/,
     )
     const names = await readdir(dir)
     assert.ok(!names.includes('targets.json.lock'), 'no lock was created under a live recovery gate')
@@ -526,7 +526,7 @@ test('a WEDGED live gate bounds even a verified acquisition (own verified lock g
   try {
     await assert.rejects(
       () => withStoreLock(file, async () => assert.fail('must not run'), { timeoutMs: 500, graceMs: 1000, retryMs: 20 }),
-      /timed out.*target-store lock/,
+      /timed out.*lock/,
     )
   } finally {
     delete _lockTestHooks.writeOwner
@@ -627,6 +627,45 @@ test('update compares normalized destinations for the port override', async () =
     assert.equal(target.port, 2300, 'an inline port wins over port:null in the same update')
   } finally {
     await fake.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a zombie lock owner is treated as dead and recovered', { skip: process.platform !== 'linux' }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-zombie-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  const py = spawn('python3', ['-c', 'import os,time; p=os.fork()\nif p==0: os._exit(0)\nprint(p, flush=True); time.sleep(30)'])
+  try {
+    let pid
+    await new Promise((resolve, reject) => {
+      let buf = ''
+      py.stdout.on('data', (chunk) => {
+        buf += chunk
+        const match = /^(\d+)\n/.exec(buf)
+        if (match) { pid = Number(match[1]); resolve() }
+      })
+      py.on('error', reject)
+    })
+    let zombie = false
+    for (let i = 0; i < 200 && !zombie; i++) {
+      try {
+        const raw = await readFile(`/proc/${pid}/stat`, 'utf8')
+        if (raw.slice(raw.lastIndexOf(')') + 2).trim()[0] === 'Z') zombie = true
+        else await new Promise((resolve) => setTimeout(resolve, 10))
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+    }
+    assert.equal(zombie, true, 'the helper child is a zombie')
+    await mkdir(lock)
+    await writeFile(join(lock, 'owner'), JSON.stringify({ token: 'zombie-token', pid, at: new Date().toISOString() }))
+    const started = Date.now()
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+    assert.ok(Date.now() - started < 2500, `the lock was recovered without waiting for the timeout (${Date.now() - started}ms)`)
+  } finally {
+    py.kill('SIGKILL')
     await rm(dir, { recursive: true, force: true })
   }
 })

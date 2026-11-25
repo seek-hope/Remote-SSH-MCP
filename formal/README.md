@@ -62,7 +62,7 @@ npm run verify
 - `NoTerminalWhileCached`：缓存的终端失败抑制后续终端尝试；
 - `SingleWarmup`：同一目的地在途预热至多一个。
 
-`Abort(c)` 动作不写任何共享变量，从结构上保证了取消隔离，另由 `test/ssh-warmup.test.mjs` 覆盖。该性质是一般 action 形式的时态公式，而 TLC 只支持 `<>[]`/`[]<>`，因此未列入 `Warmup.cfg`。
+`Abort(c)` 只更新本调用方的 `st` 槽，不改动共享的预热/in-flight 状态，从结构上保证了取消隔离，另由 `test/ssh-warmup.test.mjs` 覆盖。该性质是一般 action 形式的时态公式，而 TLC 只支持 `<>[]`/`[]<>`，因此未列入 `Warmup.cfg`。
 
 ## 后台任务生命周期
 

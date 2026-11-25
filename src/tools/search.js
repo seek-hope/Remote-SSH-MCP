@@ -260,7 +260,7 @@ export function makeGlobTool(target, cwd = target.root) {
 export function makeGrepTool(target, cwd = target.root) {
   return defTextTool({
     name: 'grep',
-    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches and 512 KiB of encoded output; very long lines are shortened without splitting surrogate pairs. A single match that produces more than 4 MiB of raw remote output fails with a transport-limit error; narrow the pattern or path. The remote host must run Linux with GNU grep and coreutils 8.25+ (head -z). REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
+    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches and 512 KiB of encoded output; very long lines are shortened without splitting surrogate pairs. More than 4 MiB of aggregate raw remote output (a single huge line or many matches) fails with a transport-limit error; narrow the pattern or path. The remote host must run Linux with GNU grep and coreutils 8.25+ (head -z). REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {

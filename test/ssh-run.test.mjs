@@ -124,7 +124,7 @@ test('host-key phrases only clear the cache on ssh exit 255, not remote exits, t
     await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /exit 1/)
     assert.equal(sudoCacheSize(), 1, 'a remote exit 1 is not an ssh client failure')
 
-    delete process.env.FAKE_SSH_EXIT
+    process.env.FAKE_SSH_EXIT = '255'
     process.env.FAKE_SSH_HOLD_STDERR = '1'
     process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
     seed()
@@ -139,10 +139,50 @@ test('host-key phrases only clear the cache on ssh exit 255, not remote exits, t
       /aborted/,
     )
     assert.equal(sudoCacheSize(), 1, 'an abort does not clear the cache')
+
+    // sshRun: a remote exit 1, timeout, and abort must also keep the cache.
+    delete process.env.FAKE_SSH_HOLD_STDERR
+    process.env.FAKE_SSH_EXIT = '1'
+    seed()
+    await assert.rejects(sshRun({ target: 'h', command: 'true', controlPersist: 0 }), /exit 1/)
+    assert.equal(sudoCacheSize(), 1, 'sshRun remote exit 1 keeps the cache')
+
+    process.env.FAKE_SSH_EXIT = '255'
+    process.env.FAKE_SSH_HOLD_STDERR = '1'
+    seed()
+    const timed = await sshRun({ target: 'h', command: 'true', controlPersist: 0, timeoutMs: 300 })
+    assert.equal(timed.timedOut, true)
+    assert.equal(sudoCacheSize(), 1, 'sshRun timeout keeps the cache')
+
+    seed()
+    const controller2 = new AbortController()
+    setTimeout(() => controller2.abort(), 100)
+    await assert.rejects(
+      sshRun({ target: 'h', command: 'true', controlPersist: 0, signal: controller2.signal }),
+      /aborted/,
+    )
+    assert.equal(sudoCacheSize(), 1, 'sshRun abort keeps the cache')
   } finally {
     delete process.env.FAKE_SSH_EXIT
     delete process.env.FAKE_SSH_STDERR
     delete process.env.FAKE_SSH_HOLD_STDERR
+    await fake.cleanup()
+  }
+})
+
+test('a host-key phrase in the stderr head is found despite a stderr flood', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_HEAD_STDERR = 'Host key verification failed.\n'
+  process.env.FAKE_SSH_BIG_ERR = String(200 * 1024)
+  process.env.FAKE_SSH_EXIT = '255'
+  setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+  try {
+    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /exit 255/)
+    assert.equal(sudoCacheSize(), 0, 'the phrase in the retained head is detected')
+  } finally {
+    delete process.env.FAKE_SSH_HEAD_STDERR
+    delete process.env.FAKE_SSH_BIG_ERR
+    delete process.env.FAKE_SSH_EXIT
     await fake.cleanup()
   }
 })

@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { buildConnectCommand, ensureControlMaster, openConnectTerminal, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
+import { setCachedSudoPassword, sudoCacheKey, sudoCacheSize } from '../src/sudocache.js'
 import { installFakeSsh } from './helpers.mjs'
 
 test('command and authentication sessions isolate interactive SSH settings but preserve the route and identity', async () => {
@@ -194,6 +195,81 @@ test('the credential identity resolves host, user and port through ssh -G', asyn
   assert.ok(host.length > 0)
   assert.ok(user.length > 0)
   assert.match(port, /^\d+$/)
+})
+
+test('a headless warm-up failure that mentions host keys does not clear the cache on a non-255 exit', async () => {
+  const fake = await installFakeSsh()
+  const before = {
+    control: process.env.REMOTE_SSH_CONTROL_DIR,
+    mode: process.env.FAKE_SSH_G_MODE,
+    path: process.env.FAKE_SSH_CONTROL_PATH,
+    exit: process.env.FAKE_SSH_EXIT,
+    stderr: process.env.FAKE_SSH_STDERR,
+  }
+  process.env.REMOTE_SSH_CONTROL_DIR = join(fake.dir, 'control')
+  process.env.FAKE_SSH_G_MODE = 'controlpath-ok'
+  process.env.FAKE_SSH_CONTROL_PATH = join(fake.dir, 'cp')
+  process.env.FAKE_SSH_EXIT = '1'
+  process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
+  setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+  try {
+    const result = await ensureControlMaster(
+      { ssh: 'h', name: 'h', port: undefined, controlPersist: 43200 },
+      { interactive: false },
+    )
+    assert.equal(result.ok, false)
+    assert.match(result.error, /exit 1/)
+    assert.equal(sudoCacheSize(), 1, 'a remote exit 1 mentioning host keys does not clear the credential')
+  } finally {
+    for (const [key, name] of Object.entries({
+      control: 'REMOTE_SSH_CONTROL_DIR',
+      mode: 'FAKE_SSH_G_MODE',
+      path: 'FAKE_SSH_CONTROL_PATH',
+      exit: 'FAKE_SSH_EXIT',
+      stderr: 'FAKE_SSH_STDERR',
+    })) {
+      if (before[key] === undefined) delete process.env[name]
+      else process.env[name] = before[key]
+    }
+    await fake.cleanup()
+  }
+})
+
+test('the controlpath probe ignores stdin instead of blocking', async () => {
+  const fake = await installFakeSsh()
+  const before = {
+    control: process.env.REMOTE_SSH_CONTROL_DIR,
+    mode: process.env.FAKE_SSH_G_MODE,
+    path: process.env.FAKE_SSH_CONTROL_PATH,
+    match: process.env.FAKE_SSH_FAIL_MATCH,
+    exit: process.env.FAKE_SSH_FAIL_EXIT,
+  }
+  process.env.REMOTE_SSH_CONTROL_DIR = join(fake.dir, 'control')
+  process.env.FAKE_SSH_G_MODE = 'controlpath-stdin'
+  process.env.FAKE_SSH_CONTROL_PATH = join(fake.dir, 'cp')
+  process.env.FAKE_SSH_FAIL_MATCH = '-O'
+  process.env.FAKE_SSH_FAIL_EXIT = '1'
+  const started = Date.now()
+  try {
+    const result = await ensureControlMaster(
+      { ssh: 'h', name: 'h', port: undefined, controlPersist: 43200 },
+      { interactive: false },
+    )
+    assert.equal(result.ok, true, 'the -G probe completed and the headless connection started')
+  } finally {
+    for (const [key, name] of Object.entries({
+      control: 'REMOTE_SSH_CONTROL_DIR',
+      mode: 'FAKE_SSH_G_MODE',
+      path: 'FAKE_SSH_CONTROL_PATH',
+      match: 'FAKE_SSH_FAIL_MATCH',
+      exit: 'FAKE_SSH_FAIL_EXIT',
+    })) {
+      if (before[key] === undefined) delete process.env[name]
+      else process.env[name] = before[key]
+    }
+    await fake.cleanup()
+  }
+  assert.ok(Date.now() - started < 3000, `the -G probe did not block on stdin (${Date.now() - started}ms)`)
 })
 
 test('a truncated controlpath answer is not used to warm a master', async () => {
