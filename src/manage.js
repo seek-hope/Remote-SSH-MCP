@@ -9,7 +9,7 @@ export const manageSchema = z.strictObject({
   target: z.string().min(1).optional().describe('Existing target name for update/remove/connect/disconnect/status.'),
   ...Object.fromEntries(Object.entries(targetFields).filter(([key]) => key !== 'port').map(([key, schema]) => [key, schema.optional()])),
   port: targetFields.port.nullable().describe('SSH port; null clears an override on update, except that an inline port in the same ssh value wins.'),
-  create: z.boolean().optional().describe('Create the remote root if missing. Default false.'),
+  create: z.boolean().optional().describe('Create missing root components with mode 0700. Default false. An existing root must be a searchable/executable directory and is not repaired.'),
 })
 
 export async function findTarget(storeFile, name) {
@@ -34,20 +34,41 @@ async function verifyTarget(target, create, signal) {
   await readyTarget(target, signal)
   // Require search/execute access, not just existence: a 0000 root is unusable.
   // Create missing components under umask 077 so a restrictive account umask
-  // cannot leave the new root unreadable.
+  // cannot leave the new root unreadable. Sentinels distinguish the cases so
+  // the error can point at the real problem.
+  const root = shq(target.root)
   const command = create
-    ? `umask 077; mkdir -p -- ${shq(target.root)} && test -x ${shq(target.root)}`
-    : `test -d ${shq(target.root)} && test -x ${shq(target.root)}`
+    ? [
+      `if [ -e ${root} ] && [ ! -d ${root} ]; then echo __REMOTE_SSH_ROOT_NOTDIR__ >&2; exit 1; fi`,
+      `umask 077; mkdir -p -- ${root} || exit 1`,
+      `if [ ! -d ${root} ]; then echo __REMOTE_SSH_ROOT_NOTDIR__ >&2; exit 1; fi`,
+      `if [ ! -x ${root} ]; then echo __REMOTE_SSH_ROOT_NOEXEC__ >&2; exit 1; fi`,
+    ].join('\n')
+    : [
+      `if [ ! -e ${root} ]; then echo __REMOTE_SSH_ROOT_MISSING__ >&2; exit 1; fi`,
+      `if [ ! -d ${root} ]; then echo __REMOTE_SSH_ROOT_NOTDIR__ >&2; exit 1; fi`,
+      `if [ ! -x ${root} ]; then echo __REMOTE_SSH_ROOT_NOEXEC__ >&2; exit 1; fi`,
+    ].join('\n')
   await sshExec({ target: target.ssh, port: target.port, controlPersist: target.controlPersist, command, signal, timeoutMs: 30_000 })
     .catch(error => {
       // An abort or a transport failure is not a missing root directory.
       if (signal?.aborted) throw error
-      if (/\(exit 1\)/.test(error.message)) {
-        throw new Error(create
-          ? `Cannot create remote root ${target.root}: ${error.message}`
-          : `Cannot access remote root ${target.root}: ${error.message}. Use create: true to create it.`)
+      const message = error.message ?? String(error)
+      if (/__REMOTE_SSH_ROOT_MISSING__/.test(message)) {
+        throw new Error(`Cannot access remote root ${target.root}: it does not exist. Use create: true to create it.`)
       }
-      throw new Error(`Cannot verify remote root ${target.root}: ${error.message}`)
+      if (/__REMOTE_SSH_ROOT_NOTDIR__/.test(message)) {
+        throw new Error(`Cannot access remote root ${target.root}: it is not a directory.`)
+      }
+      if (/__REMOTE_SSH_ROOT_NOEXEC__/.test(message)) {
+        throw new Error(`Cannot access remote root ${target.root}: it exists but is not searchable/executable; fix its permissions (create: true does not change an existing root).`)
+      }
+      if (/\(exit 1\)/.test(message)) {
+        throw new Error(create
+          ? `Cannot create remote root ${target.root}: ${message}`
+          : `Cannot access remote root ${target.root}: ${message}. Use create: true to create a missing root.`)
+      }
+      throw new Error(`Cannot verify remote root ${target.root}: ${message}`)
     })
 }
 

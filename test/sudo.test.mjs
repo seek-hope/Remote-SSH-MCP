@@ -625,7 +625,7 @@ test('the sudo tool rejects undecodable commands before prompting', async () => 
   await assert.rejects(tool.execute({ command: 'id', workdir: 'bad\ud800' }, { signal }), /surrogate|UTF-8/)
 })
 
-test('the sudo password socket is usable under a restrictive umask', async () => {
+test('the sudo password socket is usable under a restrictive umask', { skip: process.getuid?.() === 0 }, async () => {
   const h = await harness({ password: 'fakepw' })
   // Pre-create logs under the normal umask; the fakes append to them below.
   await writeFile(h.ssh.log, '')

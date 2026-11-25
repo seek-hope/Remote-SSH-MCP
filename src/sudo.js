@@ -225,8 +225,9 @@ async function promptForPassword(target, { promptTimeoutMs, signal }) {
 
     // listen() creates the socket 0777 & ~umask; make it owner-only so a
     // restrictive umask cannot leave the same-user client unable to connect.
+    // 0700 (not 0600): Darwin requires the execute bit on a socket inode.
     try {
-      await chmod(socketPath, 0o600)
+      await chmod(socketPath, 0o700)
     } catch (error) {
       return { ok: false, error: `cannot secure the local sudo password socket: ${error.message}` }
     }

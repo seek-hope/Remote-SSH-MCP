@@ -910,17 +910,34 @@ test('add verifies an executable root and creates it umask-safely', async () => 
     }
     assert.equal((await stat(root)).mode & 0o777, 0o700)
 
+    // A missing root without create is rejected (covers the test -d check).
+    await assert.rejects(
+      manageTargets({ action: 'add', name: 'missing', ssh: 'h', root: join(dir, 'missing-root'), controlPersist: 0 }, store),
+      /does not exist/,
+    )
+    // An executable regular file is not a directory.
+    const fileRoot = join(dir, 'file-root')
+    await writeFile(fileRoot, 'x', { mode: 0o755 })
+    await assert.rejects(
+      manageTargets({ action: 'add', name: 'file-root', ssh: 'h', root: fileRoot, controlPersist: 0 }, store),
+      /not a directory/,
+    )
+    await assert.rejects(
+      manageTargets({ action: 'add', name: 'file-root-create', ssh: 'h', root: fileRoot, create: true, controlPersist: 0 }, store),
+      /not a directory/,
+    )
+
     if (process.getuid?.() !== 0) {
       const locked = join(dir, 'locked')
       await mkdir(locked)
       await chmod(locked, 0)
       await assert.rejects(
         manageTargets({ action: 'add', name: 'noexec', ssh: 'h', root: locked, controlPersist: 0 }, store),
-        /Cannot access/,
+        /not searchable/,
       )
       await assert.rejects(
         manageTargets({ action: 'add', name: 'noexec-create', ssh: 'h', root: locked, create: true, controlPersist: 0 }, store),
-        /Cannot create/,
+        /not searchable/,
       )
     }
   } finally {

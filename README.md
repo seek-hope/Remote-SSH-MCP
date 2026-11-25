@@ -141,7 +141,7 @@ node src/cli.js --help
 - `name`（可选）：目标名称，必须唯一；省略时使用规范化后的 SSH 目标。
 - `ssh`（必填）：`~/.ssh/config` 中的别名或 `user@host`。支持 `user@host:2222` 与 `user@[::1]:2222`；裸 IPv6 地址的端口用 `port` 指定。该字段不接受整条 shell 命令，也不接受密码。
 - `port`（可选）：SSH 端口覆盖；`port: null` 会清除它。更新时重复传入相同的 `ssh` 不会丢弃已有端口；改变 `ssh` 且未显式提供端口时，旧端口覆盖会被清除，避免把旧主机的端口带到新别名。若同一次更新中 `ssh` 自带内联端口而 `port` 为 `null`，以内联端口为准。
-- `root`（必填）：远端绝对路径，不接受 NUL、`..` 路径段或不成对的 UTF-16 代理项（`name` 同样不接受后者）。
+- `root`（必填）：远端绝对路径，不接受 NUL、`..` 路径段或不成对的 UTF-16 代理项（`name` 同样不接受后者）。`add`/`update` 要求它已存在、是目录且可搜索/执行；`create: true` 仅创建缺失的组件（权限 `0700`），不会修复已存在但不可搜索的目录。
 - `controlPersist`（可选）：连接复用保留时间，单位为秒，默认 43200（12 小时），上限 31536000；`0` 或 `null` 禁用连接复用。
 
 ### 连接复用
@@ -202,7 +202,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 ### 目标管理
 
-`remote_ssh_targets` 通过 `action` 字段执行操作。`add` 与 `update` 会验证远端连通性与 `root` 目录，并在需要时触发交互式认证；仅当 `create: true` 时创建缺失的 `root` 目录：
+`remote_ssh_targets` 通过 `action` 字段执行操作。`add` 与 `update` 会验证远端连通性与 `root` 目录（必须是可搜索/执行的目录），并在需要时触发交互式认证；仅当 `create: true` 时创建缺失的路径组件（权限 `0700`），已存在的目录不会被修复：
 
 ```json
 {"action":"add","name":"gpu","ssh":"gpu-alias","root":"/data/project","create":true}
@@ -244,7 +244,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 1. **免密探测**：先单独运行 `sudo -n -v`，不执行任何用户命令。成功（`NOPASSWD` 或仍有效的全局 sudo 票据）时，命令在第二次 SSH 调用中以 `sudo -n` 执行，不需要密码，也不会打开终端。探测不跑用户代码，因此其结果无法被命令伪造，也不会造成重复执行。
 2. **内存缓存**：需要密码时，按 SSH 目的地复用最近一次输入的密码。默认从输入时刻起保留 20 分钟（绝对值，不使用滑动续期）；到期后不再可读，并由定时器或下一次访问清零（`REMOTE_SSH_SUDO_CACHE_MS` 超过约 24.8 天时只有惰性清零）。设为 `0` 关闭缓存。
-3. **终端提示**：缓存未命中时，在运行 MCP 服务的本机新开终端。提示会显示目标名与配置的 SSH 目的地（别名或 `user@host`）及其端口，控制字符会被替换。密码用 `read -s` 静默读入，经 `src/sudo.js` 的本机私有 Unix socket（0700 临时目录）交给 MCP 进程。
+3. **终端提示**：缓存未命中时，在运行 MCP 服务的本机新开终端。提示会显示目标名与配置的 SSH 目的地（别名或 `user@host`）及其端口，控制字符会被替换。密码用 `read -s` 静默读入，经 `src/sudo.js` 的本机私有 Unix socket（0700 临时目录，socket 权限 `0700`，owner-only）交给 MCP 进程。
 
 密码只发送给 `sudo -S -v` 做认证，该调用同样不执行用户命令；随后 `sudo -n -v` 复核票据。如果 sudo 因票据或 `NOPASSWD` 没有读取密码，SSH stdin 上残留的一行会由短生命周期的 `bash` 在命令启动前消费掉（drain 自身失败会中止，不运行命令）。命令在同一个远端 shell 中通过 `sudo -n` 执行，stdin 为 `/dev/null`；认证调用与命令是同一个子 shell 的子进程，因此默认的 ppid 票据仍然有效。因此：
 
