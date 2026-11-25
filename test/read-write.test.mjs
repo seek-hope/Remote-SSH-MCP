@@ -265,3 +265,16 @@ test('bash rejects NUL and unpaired surrogates in commands and workdir', async (
   await assert.rejects(bash.execute({ command: 'echo \ud800', run_in_background: true }, { signal }), /surrogate|UTF-8/)
   await assert.rejects(bash.execute({ command: 'true', workdir: 'bad\ud800' }, { signal }), /surrogate|UTF-8/)
 })
+
+test('write creates missing parents under a restrictive remote umask', async () => fixture(async ({ dir, write }) => {
+  const previous = process.umask(0o777)
+  try {
+    const target = join(dir, 'a', 'b', 'file.txt')
+    await write.execute({ file_path: target, content: 'x' }, {})
+    assert.equal(await readFile(target, 'utf8'), 'x')
+    assert.equal((await stat(join(dir, 'a'))).mode & 0o777, 0o700)
+    assert.equal((await stat(join(dir, 'a', 'b'))).mode & 0o777, 0o700)
+  } finally {
+    process.umask(previous)
+  }
+}))

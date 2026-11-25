@@ -552,6 +552,10 @@ export function withStoreLock(file, fn, opts) {
         await mkdir(existing, { mode: 0o700 })
       } catch (e) {
         if (e?.code !== 'EEXIST') throw e
+        // EEXIST may be a dangling symlink or a regular file; stat() surfaces
+        // ENOENT/ENOTDIR immediately instead of retrying into a lock timeout.
+        const info = await stat(existing)
+        if (!info.isDirectory()) throw new Error(`store parent ${existing} is not a directory`)
         continue
       }
       await chmod(existing, 0o700)

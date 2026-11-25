@@ -874,3 +874,23 @@ test('save refuses a store larger than the read cap and keeps the old file', asy
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a dangling symlink store parent fails immediately, not as a lock timeout', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-dangling-parent-'))
+  const link = join(dir, 'link')
+  try {
+    await symlink(join(dir, 'missing-target'), link)
+    const started = Date.now()
+    await assert.rejects(
+      withStoreLock(join(link, 'targets.json'), async () => 'ok', { timeoutMs: 400, graceMs: 1000, retryMs: 10 }),
+      (error) => {
+        assert.doesNotMatch(error.message, /timed out/)
+        assert.match(error.message, /ENOENT|not a directory/)
+        return true
+      },
+    )
+    assert.ok(Date.now() - started < 2000)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

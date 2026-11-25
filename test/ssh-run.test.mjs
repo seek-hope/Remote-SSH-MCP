@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connectTimeoutMs, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
@@ -387,6 +387,26 @@ test('a host-key phrase in the stderr head is found despite a stderr flood', asy
     delete process.env.FAKE_SSH_BIG_ERR
     delete process.env.FAKE_SSH_EXIT
     await fake.cleanup()
+  }
+})
+
+test('nested control directories are created despite a restrictive umask', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'remote-ssh-control-nested-'))
+  const previous = process.env.REMOTE_SSH_CONTROL_DIR
+  const previousUmask = process.umask(0o777)
+  const dir = join(base, 'a', 'b', 'control')
+  process.env.REMOTE_SSH_CONTROL_DIR = dir
+  try {
+    const spec = await sshSpawn({ target: 'h', controlPersist: 43200 }, 'true')
+    assert.ok(spec.args.some((arg) => arg.includes(dir)))
+    assert.equal((await stat(join(base, 'a'))).mode & 0o777, 0o700)
+    assert.equal((await stat(join(base, 'a', 'b'))).mode & 0o777, 0o700)
+    assert.equal((await stat(dir)).mode & 0o777, 0o700)
+  } finally {
+    process.umask(previousUmask)
+    if (previous === undefined) delete process.env.REMOTE_SSH_CONTROL_DIR
+    else process.env.REMOTE_SSH_CONTROL_DIR = previous
+    await rm(base, { recursive: true, force: true })
   }
 })
 

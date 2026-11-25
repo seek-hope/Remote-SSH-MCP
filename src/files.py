@@ -30,7 +30,30 @@ def atomic_write(path, source, size, digest=None, expected=None):
     """
     path = os.path.realpath(path)
     parent = os.path.dirname(path)
-    os.makedirs(parent, exist_ok=True)
+    # Create missing parents one component at a time and chmod each: makedirs'
+    # umask-masked intermediate modes can be 0000 under a restrictive umask.
+    missing = []
+    current = parent
+    while True:
+        try:
+            info = os.stat(current)
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError('%s is not a directory' % current)
+            break
+        except FileNotFoundError:
+            missing.append(current)
+            upper = os.path.dirname(current)
+            if upper == current:
+                raise
+            current = upper
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            if not os.path.isdir(directory):
+                raise ValueError('%s is not a directory' % directory)
+            continue
+        os.chmod(directory, 0o700)
     try:
         existing = os.stat(path)
     except FileNotFoundError:

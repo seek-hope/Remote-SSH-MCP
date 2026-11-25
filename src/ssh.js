@@ -9,9 +9,9 @@
  */
 
 import { spawn } from 'node:child_process'
-import { chmod, mkdir } from 'node:fs/promises'
+import { chmod, mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import { effectiveControlPersist } from './target.js'
@@ -85,9 +85,41 @@ function keepaliveArgs() {
 }
 
 /** Create the ControlPath directory once per process (and keep it private). */
+async function ensurePrivateDir(dir) {
+  const missing = []
+  let existing = dir
+  for (;;) {
+    try {
+      const info = await stat(existing)
+      if (!info.isDirectory()) throw new Error(`${existing} is not a directory`)
+      break
+    } catch (e) {
+      if (e?.code !== 'ENOENT') throw e
+      const parent = dirname(existing)
+      if (parent === existing) throw e
+      missing.unshift(basename(existing))
+      existing = parent
+    }
+  }
+  for (const part of missing) {
+    existing = join(existing, part)
+    try {
+      await mkdir(existing, { mode: 0o700 })
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e
+      const info = await stat(existing)
+      if (!info.isDirectory()) throw new Error(`${existing} is not a directory`)
+      continue
+    }
+    await chmod(existing, 0o700)
+  }
+  await chmod(dir, 0o700)
+}
+
 async function ensureControlDir() {
-  await mkdir(controlDir(), { recursive: true, mode: 0o700 })
-  await chmod(controlDir(), 0o700)
+  // Component-wise creation: recursive mkdir's mode is umask-masked, and a
+  // 0000 parent would block its own child under a restrictive umask.
+  await ensurePrivateDir(controlDir())
 }
 
 /** [-p port] for targets that override the port. */
