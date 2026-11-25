@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildSudoPromptScript, runSudoCommand, sudoPasswordPrompt } from '../src/sudo.js'
@@ -630,14 +630,44 @@ test('the sudo password socket is usable under a restrictive umask', { skip: pro
   // Pre-create logs under the normal umask; the fakes append to them below.
   await writeFile(h.ssh.log, '')
   await writeFile(h.sudo.log, '')
-  if (h.term.log) await writeFile(h.term.log, '')
+  await writeFile(h.term.log, '')
+  await writeFile(h.term.modeLog, '')
   const previous = process.umask(0o777)
   try {
     const result = await run({ timeoutMs: 3000 })
     assert.equal(result.ok, true, JSON.stringify(result))
     assert.equal(result.stdout, String(process.getuid()))
+    assert.equal((await readFile(h.term.modeLog, 'utf8')).trim(), '700')
   } finally {
     process.umask(previous)
+    await h.cleanup()
+  }
+})
+
+test('sudo output caps exclude the wrapper START marker', async () => {
+  const h = await harness({ password: 'fakepw' })
+  try {
+    const out = await run({ command: 'head -c 524288 /dev/zero | tr "\\0" A' })
+    assert.equal(out.ok, true, JSON.stringify(out))
+    assert.equal(out.stdout.length, 512 * 1024)
+    assert.equal(out.stdoutTruncated, false)
+
+    const err = await run({ command: 'head -c 65536 /dev/zero | tr "\\0" E >&2' })
+    assert.equal(err.ok, true, JSON.stringify(err))
+    assert.equal(err.stderr.length, 64 * 1024)
+    assert.equal(err.stderrTruncated, false)
+
+    const merged = await run({ command: 'exec 2>&1; true' })
+    assert.equal(merged.ok, true, JSON.stringify(merged))
+    assert.equal(merged.stdout, '')
+    assert.doesNotMatch(merged.stdout, /__REMOTE_SSH_SUDO_/)
+
+    // Redirecting stderr must not capture the wrapper's marker in a file.
+    const redirect = await run({ command: 'f=$(mktemp); exec 2>"$f"; echo hi >&2; cat "$f"; rm -f "$f"' })
+    assert.equal(redirect.ok, true, JSON.stringify(redirect))
+    assert.equal(redirect.stdout, 'hi')
+    assert.doesNotMatch(redirect.stdout, /__REMOTE_SSH_SUDO_/)
+  } finally {
     await h.cleanup()
   }
 })

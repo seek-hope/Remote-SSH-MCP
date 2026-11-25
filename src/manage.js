@@ -1,7 +1,7 @@
 import * as z from 'zod/v4'
 import { parseTargets, targetFields, effectiveControlPersist } from './target.js'
 import { readTargetStoreStrict, saveTargetStore, withStoreLock } from './store.js'
-import { ensureControlMaster, sshControl, sshExec, shq } from './ssh.js'
+import { ensureControlMaster, sshControl, sshRun, shq } from './ssh.js'
 import { clearCachedSudoPassword, sudoCacheKey } from './sudocache.js'
 
 export const manageSchema = z.strictObject({
@@ -49,27 +49,33 @@ async function verifyTarget(target, create, signal) {
       `if [ ! -d ${root} ]; then echo __REMOTE_SSH_ROOT_NOTDIR__ >&2; exit 1; fi`,
       `if [ ! -x ${root} ]; then echo __REMOTE_SSH_ROOT_NOEXEC__ >&2; exit 1; fi`,
     ].join('\n')
-  await sshExec({ target: target.ssh, port: target.port, controlPersist: target.controlPersist, command, signal, timeoutMs: 30_000 })
-    .catch(error => {
-      // An abort or a transport failure is not a missing root directory.
-      if (signal?.aborted) throw error
-      const message = error.message ?? String(error)
-      if (/__REMOTE_SSH_ROOT_MISSING__/.test(message)) {
-        throw new Error(`Cannot access remote root ${target.root}: it does not exist. Use create: true to create it.`)
-      }
-      if (/__REMOTE_SSH_ROOT_NOTDIR__/.test(message)) {
-        throw new Error(`Cannot access remote root ${target.root}: it is not a directory.`)
-      }
-      if (/__REMOTE_SSH_ROOT_NOEXEC__/.test(message)) {
-        throw new Error(`Cannot access remote root ${target.root}: it exists but is not searchable/executable; fix its permissions (create: true does not change an existing root).`)
-      }
-      if (/\(exit 1\)/.test(message)) {
-        throw new Error(create
-          ? `Cannot create remote root ${target.root}: ${message}`
-          : `Cannot access remote root ${target.root}: ${message}. Use create: true to create a missing root.`)
-      }
-      throw new Error(`Cannot verify remote root ${target.root}: ${message}`)
-    })
+  let result
+  try {
+    result = await sshRun({ target: target.ssh, port: target.port, controlPersist: target.controlPersist, command, signal, timeoutMs: 30_000 })
+  } catch (error) {
+    // An abort or a transport failure is not a missing root directory.
+    if (signal?.aborted) throw error
+    throw new Error(`Cannot verify remote root ${target.root}: ${error?.message ?? String(error)}`)
+  }
+  if (result.timedOut) throw new Error(`Cannot verify remote root ${target.root}: the check timed out`)
+  if (result.code === 0) return
+  // Classify only standalone stderr sentinel lines; timeout/error text may
+  // quote the command (and a root path may contain the marker text).
+  const stderr = `${result.stderrHead ?? ''}\n${result.stderr ?? ''}`
+  const sentinel = (name) => new RegExp(`^__REMOTE_SSH_ROOT_${name}__\\r?$`, 'm').test(stderr)
+  if (sentinel('MISSING')) {
+    throw new Error(`Cannot access remote root ${target.root}: it does not exist or is not accessible (check parent-directory search/execute permissions and dangling symlinks); create: true only creates a genuinely missing path.`)
+  }
+  if (sentinel('NOTDIR')) {
+    throw new Error(`Cannot access remote root ${target.root}: it is not a directory.`)
+  }
+  if (sentinel('NOEXEC')) {
+    throw new Error(`Cannot access remote root ${target.root}: it exists but is not searchable/executable; fix its permissions (create: true does not change an existing root).`)
+  }
+  const detail = (result.stderr || result.stdout).trim()
+  throw new Error(create
+    ? `Cannot create remote root ${target.root}: ${detail || `exit ${result.code}`}`
+    : `Cannot access remote root ${target.root}: ${detail || `exit ${result.code}`}. Use create: true to create a missing root.`)
 }
 
 export async function manageTargets(input, storeFile, signal) {

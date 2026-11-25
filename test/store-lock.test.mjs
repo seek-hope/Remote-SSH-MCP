@@ -604,7 +604,7 @@ test('the target store is 0600 even under a restrictive umask', async () => {
 test('update compares normalized destinations for the port override', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-manage-port-'))
   const file = join(dir, 'targets.json')
-  const fake = await installFakeSsh()
+  const fake = await installLocalSsh()
   try {
     await saveTargetStore(file, [{ name: 'v6', ssh: 'user@::1', port: 2222, root: '/', controlPersist: 0 }])
     await manageTargets({ action: 'update', target: 'v6', ssh: 'user@[::1]' }, file)
@@ -913,7 +913,7 @@ test('add verifies an executable root and creates it umask-safely', async () => 
     // A missing root without create is rejected (covers the test -d check).
     await assert.rejects(
       manageTargets({ action: 'add', name: 'missing', ssh: 'h', root: join(dir, 'missing-root'), controlPersist: 0 }, store),
-      /does not exist/,
+      /does not exist or is not accessible/,
     )
     // An executable regular file is not a directory.
     const fileRoot = join(dir, 'file-root')
@@ -939,6 +939,25 @@ test('add verifies an executable root and creates it umask-safely', async () => 
         manageTargets({ action: 'add', name: 'noexec-create', ssh: 'h', root: locked, create: true, controlPersist: 0 }, store),
         /not searchable/,
       )
+
+      // A root path containing a sentinel must not be classified as missing:
+      // only standalone stderr marker lines count.
+      const readOnlyParent = join(dir, 'read-only-parent')
+      await mkdir(readOnlyParent)
+      await chmod(readOnlyParent, 0o555)
+      try {
+        const markerRoot = join(readOnlyParent, '__REMOTE_SSH_ROOT_MISSING__', 'child')
+        await assert.rejects(
+          manageTargets({ action: 'add', name: 'marker-path', ssh: 'h', root: markerRoot, create: true, controlPersist: 0 }, store),
+          (error) => {
+            assert.doesNotMatch(error.message, /does not exist or is not accessible/)
+            assert.match(error.message, /Cannot create remote root|Permission denied/)
+            return true
+          },
+        )
+      } finally {
+        await chmod(readOnlyParent, 0o755)
+      }
     }
   } finally {
     await ssh.cleanup()

@@ -228,8 +228,9 @@ export async function installFakeTerminal({ password = 'fakepw', delayMs = 0 } =
   const dir = await mkdtemp(join(tmpdir(), 'dsh-fake-terminal-'))
   const bin = join(dir, 'terminal.sh')
   const log = join(dir, 'invocations.log')
+  const modeLog = join(dir, 'socket-mode.log')
   const delay = (Math.max(0, Number(delayMs) || 0) / 1000).toFixed(3)
-  await writeFile(bin, `#!/usr/bin/env bash\ncmd="\${@: -1}"\nsleep ${delay}\nprintf 'prompt\\n' >> ${JSON.stringify(log)}\nprintf '%s\\n' "$FAKE_TERMINAL_PASSWORD" | /bin/bash -c "$cmd"\n`)
+  await writeFile(bin, `#!/usr/bin/env bash\ncmd="\${@: -1}"\nsleep ${delay}\nsock=$(printf '%s' "$cmd" | grep -o "[^ '\\"]*askpass[.]sock" | head -n 1)\nif [ -n "$sock" ]; then { stat -c '%a' "$sock" 2>/dev/null || stat -f '%Lp' "$sock" 2>/dev/null; } >> ${JSON.stringify(modeLog)}; fi\nprintf 'prompt\\n' >> ${JSON.stringify(log)}\nprintf '%s\\n' "$FAKE_TERMINAL_PASSWORD" | /bin/bash -c "$cmd"\n`)
   await chmod(bin, 0o700)
   const previousTerminal = process.env.REMOTE_SSH_TERMINAL
   const previousPassword = process.env.FAKE_TERMINAL_PASSWORD
@@ -238,6 +239,7 @@ export async function installFakeTerminal({ password = 'fakepw', delayMs = 0 } =
   return {
     dir,
     log,
+    modeLog,
     async readLog() {
       try {
         const raw = await readFile(log, 'utf8')

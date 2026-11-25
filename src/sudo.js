@@ -26,7 +26,7 @@
  * different parent).
  *
  * Every marker uses an independent random token. The wrapper's own markers
- * signal authentication/ticket/drain/cd failures; a START/POST pair proves the
+ * signal authentication/ticket/drain/cd failures; the START marker proves the
  * user command was actually reached, so a failed final `sudo -n` is reported
  * as an error instead of a command exit. User code never runs before
  * authentication, and there is no automatic retry after an authentication
@@ -60,6 +60,10 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 300_000
 const DEFAULT_PROMPT_TIMEOUT_MS = 150_000
+const SUDO_MAX_STDOUT = 512 * 1024
+const SUDO_MAX_STDERR = 64 * 1024
+/** Room for the START marker before command output is capped for the caller. */
+const SUDO_MARK_MARGIN = 1024
 /** A sudo password is short; anything larger is a broken local client. */
 const MAX_PASSWORD_BYTES = 8 * 1024
 /** How long the drain waits for the password line/EOF before refusing. */
@@ -410,10 +414,12 @@ export function sudoPasswordPrompt(target) {
  * The bash sudo runs. The user command is passed as an argument and evaluated
  * after stdin is reset, so the outer wrapper never has to parse it (a syntax
  * error is a command failure, not an authentication failure), and the command
- * cannot read a leftover password from the SSH stdin pipe. START/POST prove
- * the command was reached: a failed final `sudo -n` prints neither.
+ * cannot read a leftover password from the SSH stdin pipe. The START marker
+ * proves the command was reached: a failed final `sudo -n` does not print it.
+ * There is no POST marker: it would run after user code and could be
+ * redirected into command output/files.
  */
-function innerScript(cdMark, startMark, postMark) {
+function innerScript(cdMark, startMark) {
   return [
     '__remote_ssh_cmd=$1',
     '__remote_ssh_dir=$2',
@@ -423,7 +429,6 @@ function innerScript(cdMark, startMark, postMark) {
     `printf '\\n%s\\n' ${shq(startMark)} >&2`,
     'eval "$__remote_ssh_cmd"',
     '__remote_ssh_rc=$?',
-    `printf '\\n%s\\n' ${shq(postMark)} >&2`,
     'exit "$__remote_ssh_rc"',
   ].join('\n')
 }
@@ -433,7 +438,7 @@ function innerScript(cdMark, startMark, postMark) {
  * - probe: `sudo -n -v` only. It runs no user code, so nothing can forge its
  *   result or be executed twice.
  * - command: `sudo -n` (a valid NOPASSWD rule or global ticket was proven by
- *   the probe). A failure here runs no user code either; START/POST tell the
+ *   the probe). A failure here runs no user code either; START tells the
  *   caller whether the command was reached, and there is no password retry.
  * - password: `sudo -S -v` consumes the password (no user code), a second
  *   `-n -v` proves a ticket was retained, any unconsumed line is drained, and
@@ -443,7 +448,7 @@ function innerScript(cdMark, startMark, postMark) {
  */
 function remoteSudoScript({ command, workdir, mode, marks }) {
   const run = [
-    `sudo -n -- bash -c ${shq(innerScript(marks.cd, marks.start, marks.post))} bash ${shq(command)} ${shq(workdir)}`,
+    `sudo -n -- bash -c ${shq(innerScript(marks.cd, marks.start))} bash ${shq(command)} ${shq(workdir)}`,
     '__remote_ssh_rc=$?',
     'exit "$__remote_ssh_rc"',
   ].join('\n')
@@ -498,6 +503,15 @@ function stripMarks(stderr, marks) {
   return kept.join('\n')
 }
 
+/** Tail-cap stripped command output to its documented byte budget. */
+function capCommandOutput(text, cap) {
+  const bytes = Buffer.from(text, 'utf8')
+  if (bytes.length <= cap) return { text, truncated: false }
+  let start = bytes.length - cap
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1
+  return { text: bytes.subarray(start).toString('utf8'), truncated: true }
+}
+
 /** Compact stderr for a reported error, keeping a leading policy line. */
 function errorDetail(stderr, marks) {
   const lines = stripMarks(stderr, marks).trim().split('\n').filter(line => line.trim() !== '')
@@ -519,7 +533,6 @@ function makeMarks() {
     drain: token(),
     cd: token(),
     start: token(),
-    post: token(),
   }
 }
 
@@ -547,8 +560,10 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
       wipeStdin: true,
       signal,
       timeoutMs,
-      maxStdout: 512 * 1024,
-      maxStderr: 64 * 1024,
+      // Reserve room for the START marker; the caller-facing caps are applied
+      // after stripping it so a command's exact cap is not reduced.
+      maxStdout: SUDO_MAX_STDOUT + SUDO_MARK_MARGIN,
+      maxStderr: SUDO_MAX_STDERR + SUDO_MARK_MARGIN,
     })
   } catch (error) {
     // sshRun clears the cache itself on a genuine ssh-255 host-key failure;
@@ -558,41 +573,49 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
     input?.fill(0)
   }
 
+  // Strip the wrapper's START marker (and any marker-looking lines) and then
+  // apply the documented caps to the command's own output.
+  const stdoutInfo = capCommandOutput(stripMarks(result.stdout, marks), SUDO_MAX_STDOUT)
+  const stderrInfo = capCommandOutput(stripMarks(result.stderr, marks), SUDO_MAX_STDERR)
+  const stdout = stdoutInfo.text
+  const stderr = stderrInfo.text
+  const stdoutTruncated = result.stdoutTruncated === true || stdoutInfo.truncated
+  const stderrTruncated = result.stderrTruncated === true || stderrInfo.truncated
   if (result.timedOut) {
     return {
       ok: false,
       timedOut: true,
       code: null,
-      stdout: result.stdout,
-      stderr: stripMarks(result.stderr, marks),
-      stdoutTruncated: result.stdoutTruncated,
-      stderrTruncated: result.stderrTruncated,
+      stdout,
+      stderr,
+      stdoutTruncated,
+      stderrTruncated,
       error: `sudo command did not finish within ${timeoutMs}ms`,
     }
   }
   const detail = errorDetail(result.stderr, marks)
   // The START/authentication markers are printed before the command; keep
-  // scanning a bounded head of stderr so a command that floods stderr (and
-  // then exits before POST) is still recognized as having run.
+  // scanning a bounded head of stderr so a command that floods stderr is
+  // still recognized as having run.
   const seen = `${result.stderrHead ?? ''}\n${result.stderr ?? ''}`
   // Markers are printed as standalone lines. Substring matching would also
   // match sudo's denial message, which echoes the wrapper command line
   // containing the marker tokens without ever running the command.
   const seenLines = new Set(seen.split('\n').map((line) => line.trim()))
   const saw = (mark) => seenLines.has(mark)
-  // START/POST are authoritative: once the command was reached, marker-looking
-  // text it printed itself (for example its own /proc/$$/cmdline, which
-  // contains the cd/start/post tokens) must not turn a completed run into a
-  // false cd/auth/ticket failure.
-  const ran = saw(marks.start) || saw(marks.post)
+  // START is authoritative: once the command was reached, marker-looking text
+  // it printed itself (for example its own /proc/$$/cmdline, which contains
+  // the cd/start tokens) must not turn a completed run into a false
+  // cd/auth/ticket failure.
+  const ran = saw(marks.start)
   if (mode !== 'probe' && ran) {
     return {
       ok: true,
       code: result.code,
-      stdout: result.stdout,
-      stderr: stripMarks(result.stderr, marks),
-      stdoutTruncated: result.stdoutTruncated,
-      stderrTruncated: result.stderrTruncated,
+      stdout,
+      stderr,
+      stdoutTruncated,
+      stderrTruncated,
     }
   }
   if (saw(marks.drain)) {
@@ -612,8 +635,8 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
       return {
         ok: true,
         code: 0,
-        stdout: result.stdout,
-        stderr: stripMarks(result.stderr, marks),
+        stdout,
+        stderr,
       }
     }
     if (!saw(marks.probe)) {
@@ -633,23 +656,23 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
       ok: false,
       authRequired: true,
       code: result.code,
-      stdout: result.stdout,
+      stdout,
       stderr: detail,
     }
   }
   if (mode !== 'probe') {
-    // No START/POST: sudo failed before the command started, so report an
-    // error instead of a misleading command exit. Never fall back to a
-    // password here, which could run an already-executed command twice.
+    // No START: sudo failed before the command started, so report an error
+    // instead of a misleading command exit. Never fall back to a password
+    // here, which could run an already-executed command twice.
     return { ok: false, error: `sudo did not run the command${detail ? `: ${detail}` : ''}` }
   }
   return {
     ok: true,
     code: result.code,
-    stdout: result.stdout,
-    stderr: stripMarks(result.stderr, marks),
-    stdoutTruncated: result.stdoutTruncated,
-    stderrTruncated: result.stderrTruncated,
+    stdout,
+    stderr,
+    stdoutTruncated,
+    stderrTruncated,
   }
 }
 
