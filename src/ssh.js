@@ -187,6 +187,18 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
 }
 
 /**
+ * Decode a tail-capped stderr buffer, dropping leading UTF-8 continuation
+ * bytes when truncation started inside a multi-byte character.
+ */
+function decodeTail(chunks, total, cap) {
+  let buf = Buffer.concat(chunks)
+  if (total > cap) {
+    while (buf.length > 0 && (buf[0] & 0xc0) === 0x80) buf = buf.subarray(1)
+  }
+  return buf.toString('utf8')
+}
+
+/**
  * Run `ssh -G` with stdin ignored, a detached process group, and a bounded
  * buffer. `accept(out)` decides whether a complete answer already arrived when
  * the deadline fires, so a descendant holding the pipes cannot force a false
@@ -425,11 +437,11 @@ export async function sshExec(opts) {
   return runSshChild(spec, {
     stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin,
     onTimeout: () => new Error(`ssh timeout after ${timeoutMs}ms: ${command.slice(0, 120)}`),
-    onClose: ({ transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, settle }) => {
+    onClose: ({ transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, errTotal, settle }) => {
       // A timeout/abort already settled the promise; the late close must not
       // clear the sudo cache based on whatever stderr was collected.
       if (timedOut || settled) return
-      const stderr = Buffer.concat(errChunks).toString('utf8')
+      const stderr = decodeTail(errChunks, errTotal, maxStderr)
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
       if (transportCode !== 0) {
         // Only ssh's own 255 is a client/transport failure. A remote command
@@ -542,7 +554,7 @@ export async function sshRun(opts) {
         while (outBuf.length > 0 && (outBuf[0] & 0xc0) === 0x80) outBuf = outBuf.subarray(1)
       }
       const stdout = outBuf.toString('utf8')
-      const stderr = Buffer.concat(errChunks).toString('utf8')
+      const stderr = decodeTail(errChunks, errTotal, maxStderr)
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
       const capTail = (text) => {
         const bytes = Buffer.from(text, 'utf8')

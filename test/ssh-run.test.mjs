@@ -121,6 +121,23 @@ test('an out-of-range marker code is not accepted as the exit status', async () 
   }
 })
 
+test('sshRun never returns more than maxStderr bytes at a UTF-8 boundary', async () => {
+  const ssh = await installLocalSsh()
+  try {
+    const result = await sshRun({
+      target: 'h',
+      command: 'python3 -c "import sys; sys.stderr.write(\'中\' * 30000)"',
+      controlPersist: 0,
+    })
+    assert.equal(result.stderrTruncated, true)
+    assert.ok(Buffer.byteLength(result.stderr, 'utf8') <= 64 * 1024,
+      `stderr byte cap (${Buffer.byteLength(result.stderr)})`)
+    assert.doesNotMatch(result.stderr.slice(0, 1), /\uFFFD/)
+  } finally {
+    await ssh.cleanup()
+  }
+})
+
 test('sshRun never returns more than maxStdout bytes at a UTF-8 boundary', async () => {
   const fake = await installFakeSsh()
   process.env.FAKE_SSH_STDOUT = '😀'.repeat(20)
