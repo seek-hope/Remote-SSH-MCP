@@ -508,7 +508,7 @@ function stripMarks(stderr, marks) {
  * A split marker is completed across chunks. The line buffer is bounded: a
  * marker line is short, so an unterminated longer line cannot match it.
  */
-function markerLineWatcher(mark, onMatch) {
+export function markerLineWatcher(mark, onMatch) {
   let carry = Buffer.alloc(0)
   let done = false
   return (chunk) => {

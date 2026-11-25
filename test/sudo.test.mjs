@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildSudoPromptScript, runSudoCommand, sudoPasswordPrompt } from '../src/sudo.js'
+import { buildSudoPromptScript, markerLineWatcher, runSudoCommand, sudoPasswordPrompt } from '../src/sudo.js'
 import { makeSudoTool } from '../src/tools/sudo.js'
 import {
   clearAllSudoPasswords,
@@ -675,6 +675,19 @@ test('sudo output caps exclude the wrapper START marker', async () => {
     assert.equal(await readFile(capture, 'utf8'), '')
   } finally {
     await h.cleanup()
+  }
+})
+
+test('the START watcher finds a marker split at every byte boundary', () => {
+  const mark = '__REMOTE_SSH_SUDO_START_TEST__'
+  // Includes a >4096-byte unterminated line, so the carry reset path runs.
+  const payload = Buffer.from(`banner\n${'x'.repeat(5000)}\n${mark}\nflood\n`)
+  for (let i = 0; i <= payload.length; i++) {
+    let seen = false
+    const watch = markerLineWatcher(mark, () => { seen = true })
+    watch(payload.subarray(0, i))
+    watch(payload.subarray(i))
+    assert.equal(seen, true, `split at ${i}`)
   }
 })
 
