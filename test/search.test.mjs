@@ -269,6 +269,11 @@ test('grep classifies non-regular and inaccessible roots without blocking', asyn
 test('glob rejects patterns with too many ambiguous wildcards', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-complex-'))
   try {
+    // The documented boundary is accepted: one ** plus four other stars.
+    for (const pattern of ['**/*src*/*helper*.py', '[?][?][?][?][?]']) {
+      const parts = execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '10'], { encoding: 'utf8' }).split('\0')
+      assert.equal((parts.pop() ?? '').trim(), '__REMOTE_SSH_TOTAL__0')
+    }
     for (const pattern of ['**/'.repeat(2) + 'x', '*a'.repeat(5) + 'b', '{*,*}'.repeat(3) + 'x']) {
       let failure
       try {

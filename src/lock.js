@@ -390,6 +390,10 @@ async function acquireStoreLock(file, opts) {
           const confirmed = await readOwnerRecord(lockPath)
           if (confirmed?.token === token) return { lockPath, token }
         }
+        // We published but could not confirm ownership (a transient read error
+        // or an overwrite). Do not leave our verified lock behind; the release
+        // is token-checked, so a successor's lock is left alone.
+        await releaseStoreLock({ lockPath, token })
       } else if (verdict === 'stale') {
         await recoverLock(lockPath, gatePath, token, opts.graceMs)
       }

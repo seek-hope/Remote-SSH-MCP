@@ -92,6 +92,22 @@ test('a complete exit marker wins over a descendant-held channel timeout', async
   }
 })
 
+test('sshRun decodes a no-marker tail across the carry boundary', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_SPLIT_OUTPUT = 'x'.repeat(12) + '😀' + 'y'.repeat(71)
+  try {
+    await assert.rejects(sshRun({ target: 'h', command: 'true', controlPersist: 0 }), (error) => {
+      assert.match(error.message, /without exit marker/)
+      assert.match(error.message, /😀/)
+      assert.doesNotMatch(error.message, /\uFFFD/)
+      return true
+    })
+  } finally {
+    delete process.env.FAKE_SSH_SPLIT_OUTPUT
+    await fake.cleanup()
+  }
+})
+
 test('a complete marker survives a descendant that floods stdout after it', async () => {
   const ssh = await installLocalSsh()
   try {

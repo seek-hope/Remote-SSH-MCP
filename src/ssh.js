@@ -532,8 +532,9 @@ export async function sshRun(opts) {
     stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin, onStdout: scanMarker,
     onClose: ({ transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, errTotal, settle }) => {
       if (settled) return
-      let stdout = Buffer.concat(outChunks).toString('utf8')
-      if (markerCode === undefined && carry.length > 0) stdout += carry.toString('utf8')
+      // Decode once: a multi-byte character may straddle the outChunks/carry
+      // boundary, and decoding the halves separately would corrupt it.
+      const stdout = Buffer.concat([...outChunks, carry]).toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
       const totalOutput = outTotal + (markerCode === undefined ? carry.length : 0)

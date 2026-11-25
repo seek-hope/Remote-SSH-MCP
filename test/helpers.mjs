@@ -108,6 +108,13 @@ if (process.env.FAKE_SSH_STDOUT) {
   out = out.split('__NUL__').join('\0')
   fs.writeSync(1, out)
 }
+if (process.env.FAKE_SSH_SPLIT_OUTPUT) {
+  // Two writes with a pause: exercises streaming boundaries/carry logic.
+  const buf = Buffer.from(process.env.FAKE_SSH_SPLIT_OUTPUT, 'utf8')
+  fs.writeSync(1, buf.subarray(0, 15))
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+  fs.writeSync(1, buf.subarray(15))
+}
 if (process.env.FAKE_SSH_MARK) {
   // sshRun's marker is random per call and embedded in the wrapped command;
   // echo that exact marker back so the exit code rides the expected line.

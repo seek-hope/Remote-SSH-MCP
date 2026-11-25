@@ -26,8 +26,46 @@ import heapq, os, re, stat, sys
 pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
 # Ambiguous wildcard groups cause exponential backtracking on long paths.
-# Keep a small, documented budget for all of them.
-if pattern.count('**') > 1 or pattern.count('*') + pattern.count('?') > 4 or pattern.count('{') > 2:
+# Count wildcards outside bracket classes, and count ** only once rather than
+# as two stars, so the documented budget is not stricter than it claims.
+def wildcard_budget(pat):
+    globstars = stars = questions = braces = 0
+    i = 0
+    while i < len(pat):
+        c = pat[i]
+        if c == '\\' and i + 1 < len(pat):
+            i += 2
+            continue
+        if c == '[':
+            j = i + 1
+            if j < len(pat) and pat[j] in ('!', '^'):
+                j += 1
+            if j < len(pat) and pat[j] == ']':
+                j += 1
+            while j < len(pat):
+                if pat[j] == '\\' and j + 1 < len(pat):
+                    j += 2
+                    continue
+                if pat[j] == ']':
+                    break
+                j += 1
+            i = j + 1 if j < len(pat) else i + 1
+            continue
+        if c == '*':
+            if i + 1 < len(pat) and pat[i + 1] == '*':
+                globstars += 1
+                i += 2
+                continue
+            stars += 1
+        elif c == '?':
+            questions += 1
+        elif c == '{':
+            braces += 1
+        i += 1
+    return globstars, stars + questions, braces
+
+globstars, wildcards, braces = wildcard_budget(pattern)
+if globstars > 1 or wildcards > 4 or braces > 2:
     sys.stderr.write('__REMOTE_SSH_ERR__:too-complex\n')
     sys.exit(2)
 
@@ -238,7 +276,7 @@ export function makeGlobTool(target, cwd = target.root) {
         if (r.stderr.includes('__REMOTE_SSH_ERR__:not-a-dir')) throw new Error(`glob: not a directory on ${target.name}: ${root}`)
         if (r.stderr.includes('__REMOTE_SSH_ERR__:permission')) throw new Error(`glob: permission denied on ${target.name}: ${root}`)
         if (r.stderr.includes('__REMOTE_SSH_ERR__:bad-pattern')) throw new Error(`glob: invalid pattern: ${a.pattern}`)
-        if (r.stderr.includes('__REMOTE_SSH_ERR__:too-complex')) throw new Error('glob: pattern is too complex (at most one **, four * or ? wildcards, two { alternations); simplify it or use grep')
+        if (r.stderr.includes('__REMOTE_SSH_ERR__:too-complex')) throw new Error('glob: pattern is too complex (at most one **, four other * or ? wildcards, two { alternations; class literals do not count); simplify it or use grep')
         throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       }
       if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
