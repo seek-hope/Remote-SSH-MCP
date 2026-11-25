@@ -456,6 +456,8 @@ test('the background tool does not leak PYTHONUTF8 into the command', { skip: pr
   delete process.env.PYTHONUTF8
   const ssh = await installLocalSsh()
   const dir = await mkdtemp(join(tmpdir(), 'remote-job-env-tool-'))
+  const previousJobs = process.env.REMOTE_SSH_JOB_DIR
+  process.env.REMOTE_SSH_JOB_DIR = join(dir, 'jobs')
   const target = { ssh: 'h', name: 'h', root: dir, controlPersist: 0 }
   try {
     const bash = makeBashTool(target)
@@ -474,6 +476,8 @@ test('the background tool does not leak PYTHONUTF8 into the command', { skip: pr
   } finally {
     if (previous === undefined) delete process.env.PYTHONUTF8
     else process.env.PYTHONUTF8 = previous
+    if (previousJobs === undefined) delete process.env.REMOTE_SSH_JOB_DIR
+    else process.env.REMOTE_SSH_JOB_DIR = previousJobs
     await ssh.cleanup()
     await rm(dir, { recursive: true, force: true })
   }
@@ -487,6 +491,8 @@ test('the background helper ignores PYTHONPATH module shadowing', { skip: proces
   await writeFile(join(shadow, 'json.py'), 'raise RuntimeError("shadowed stdlib json")\n')
   const previous = process.env.PYTHONPATH
   process.env.PYTHONPATH = shadow
+  const previousJobs = process.env.REMOTE_SSH_JOB_DIR
+  process.env.REMOTE_SSH_JOB_DIR = join(dir, 'jobs')
   const target = { ssh: 'h', name: 'h', root: dir, controlPersist: 0 }
   try {
     const bash = makeBashTool(target)
@@ -503,6 +509,8 @@ test('the background helper ignores PYTHONPATH module shadowing', { skip: proces
   } finally {
     if (previous === undefined) delete process.env.PYTHONPATH
     else process.env.PYTHONPATH = previous
+    if (previousJobs === undefined) delete process.env.REMOTE_SSH_JOB_DIR
+    else process.env.REMOTE_SSH_JOB_DIR = previousJobs
     await ssh.cleanup()
     await rm(dir, { recursive: true, force: true })
   }

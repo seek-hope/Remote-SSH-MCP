@@ -579,7 +579,7 @@ test('the glob helper ignores PYTHONPATH module shadowing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-shadow-'))
   const shadow = join(dir, 'shadow')
   await mkdir(shadow)
-  await writeFile(join(shadow, 'json.py'), 'raise RuntimeError("shadowed stdlib json")\n')
+  await writeFile(join(shadow, 'heapq.py'), 'raise RuntimeError("shadowed stdlib heapq")\n')
   const previous = process.env.PYTHONPATH
   process.env.PYTHONPATH = shadow
   try {
