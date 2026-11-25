@@ -334,7 +334,7 @@ export function makeGlobTool(target, cwd = target.root) {
         if (sentinel('too-complex')) throw new Error('glob: pattern is too complex (at most one **, four other * or ? wildcards, two { alternations; class literals do not count); simplify it or use grep')
         throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       }
-      if (r.stdoutRawTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
+      if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport/decoded limit; narrow the pattern or path')
       // Paths are NUL-delimited so filenames containing newlines stay intact;
       // the total marker is the text after the last NUL.
       const parts = r.stdout.split('\0')
@@ -360,7 +360,7 @@ export function makeGlobTool(target, cwd = target.root) {
 export function makeGrepTool(target, cwd = target.root) {
   return defTextTool({
     name: 'grep',
-    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches and 512 KiB of encoded output; very long lines are shortened without splitting surrogate pairs. More than 4 MiB of aggregate raw remote output (a single huge line or many matches) fails with a transport-limit error; narrow the pattern or path. The remote host must run Linux with GNU grep and coreutils 8.25+ (head -z). REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
+    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches and 512 KiB of encoded output; very long lines are shortened without splitting surrogate pairs. More than 4 MiB of aggregate raw remote output, or output that expands past 4 MiB after invalid-byte replacement, fails with a transport-limit error; narrow the pattern or path. The remote host must run Linux with GNU grep and coreutils 8.25+ (head -z). REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {
@@ -391,7 +391,7 @@ export function makeGrepTool(target, cwd = target.root) {
       const r = await sshRun({ target: target.ssh, port: target.port, command: script, signal: exec.signal, controlPersist: target.controlPersist })
       if (r.timedOut) throw new Error(`grep: search timed out on ${target.name}`)
       if (r.code !== 0) throw new Error(`grep: search failed on ${target.name}: ${r.stderr.trim() || 'remote command did not complete'}`)
-      if (r.stdoutRawTruncated) throw new Error('grep: output exceeded the transport limit; narrow the pattern or path (very long matching lines)')
+      if (r.stdoutTruncated) throw new Error('grep: output exceeded the transport/decoded limit; narrow the pattern or path (very long matching lines)')
       const raw = r.stdout
       if (raw.startsWith('__REMOTE_SSH_ERR__:no-such-path')) throw new Error(`grep: no such path or not accessible on ${target.name}: ${root}`)
       if (raw.startsWith('__REMOTE_SSH_ERR__:not-regular')) throw new Error(`grep: not a regular file or directory on ${target.name}: ${root}`)

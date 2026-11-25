@@ -36,7 +36,7 @@
  * writers ordered.
  */
 
-import { open, writeFile, rename, rm, mkdir, stat, readdir } from 'node:fs/promises'
+import { open, writeFile, rename, rm, mkdir, stat, lstat, readdir, chmod } from 'node:fs/promises'
 import { constants as fsConstants, readFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -160,8 +160,10 @@ function ownerRecord(token) {
 }
 
 async function writeOwnerRecord(lockPath, token) {
-  // Explicit owner-readable mode; umask cannot make it less readable.
-  await writeFile(ownerPathFor(lockPath), ownerRecord(token), { encoding: 'utf8', mode: 0o600 })
+  const ownerPath = ownerPathFor(lockPath)
+  await writeFile(ownerPath, ownerRecord(token), { encoding: 'utf8', mode: 0o600 })
+  // writeFile's mode is umask-masked; enforce owner-only read/write.
+  await chmod(ownerPath, 0o600)
 }
 
 /**
@@ -179,7 +181,7 @@ async function readOwnerRecord(lockPath) {
   } catch (e) {
     // Permanent shape/missing errors mean an ownerless husk; EACCES/EIO/EMFILE
     // are UNKNOWN and callers must not treat the lock as dead.
-    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO'].includes(e?.code)) return undefined
+    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP'].includes(e?.code)) return undefined
     throw e
   }
   let raw
@@ -187,9 +189,13 @@ async function readOwnerRecord(lockPath) {
     const info = await handle.stat()
     // FIFO/device/directory/socket, or an implausibly large planted file.
     if (!info.isFile() || info.size > 64 * 1024) return undefined
-    raw = await handle.readFile('utf8')
+    // Bound the read even if the file grows after the fstat.
+    const buf = Buffer.alloc(64 * 1024 + 1)
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0)
+    if (bytesRead > 64 * 1024) return undefined
+    raw = buf.subarray(0, bytesRead).toString('utf8')
   } catch (e) {
-    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO'].includes(e?.code)) return undefined
+    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP'].includes(e?.code)) return undefined
     throw e
   } finally {
     await handle.close().catch(() => {})
@@ -237,7 +243,9 @@ async function judgeLock(lockPath, graceMs) {
   }
   let mtimeMs
   try {
-    ;({ mtimeMs } = await stat(lockPath))
+    // lstat: a dangling/looping symlink at the canonical path is itself an
+    // aged husk and must be recoverable, not "gone" forever.
+    ;({ mtimeMs } = await lstat(lockPath))
   } catch {
     return 'gone'
   }
@@ -285,7 +293,8 @@ async function enterGate(gatePath, token) {
   await cleanStaleStaging(gatePath, GATE_STALE_MS)
   const staging = `${gatePath}.staging.${token}`
   try {
-    await mkdir(staging)
+    await mkdir(staging, { mode: 0o700 })
+    await chmod(staging, 0o700)
     await writeOwnerRecord(staging, token)
   } catch {
     await rm(staging, { recursive: true, force: true }).catch(() => {})
@@ -401,7 +410,8 @@ async function acquireStoreLock(file, opts) {
         // so it can no longer overwrite a successor's lock.
         const staging = `${lockPath}.staging.${token}`
         try {
-          await mkdir(staging)
+          await mkdir(staging, { mode: 0o700 })
+          await chmod(staging, 0o700)
           try {
             await (_lockTestHooks.writeOwner ?? writeOwnerRecord)(staging, token, lockPath)
             try {

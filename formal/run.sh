@@ -23,7 +23,7 @@ if [[ ! -f "$jar" ]]; then
   exit 2
 fi
 
-metadir="$(mktemp -d)"
+metadir="$(mktemp -d "${TMPDIR:-/tmp}/remote-ssh-tla.XXXXXX")"
 trap 'rm -rf "$metadir"' EXIT
 
 tlc() {

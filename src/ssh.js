@@ -25,11 +25,11 @@ const controlDir = () => {
   // OpenSSH reparses -o values: whitespace splits, quotes/backslashes change
   // parsing, # starts a comment, and % starts a token expansion.
   // Windows paths use backslashes and native OpenSSH is unsupported anyway.
-  // OpenSSH -o parsing splits whitespace, quotes change parsing, and
-  // $/{}/% trigger variable/token expansion. Mid-value # and backslash are
-  // accepted by OpenSSH and are allowed here.
-  if (process.platform !== 'win32' && /[\s"'$%{}]/.test(dir)) {
-    throw new Error('REMOTE_SSH_CONTROL_DIR must not contain whitespace, quotes, $, %, { or } (OpenSSH -o parsing/expansion)')
+  // OpenSSH -o parsing splits whitespace, quotes change parsing, $/{}/% trigger
+  // expansion, and a backslash pair is unescaped. A single backslash and a
+  // mid-value # are accepted by OpenSSH and allowed here.
+  if (process.platform !== 'win32' && (/[\s"'$%{}]/.test(dir) || dir.includes('\\\\'))) {
+    throw new Error('REMOTE_SSH_CONTROL_DIR must not contain whitespace, quotes, $, %, {}, or a double backslash (OpenSSH -o parsing/expansion)')
   }
   return dir
 }

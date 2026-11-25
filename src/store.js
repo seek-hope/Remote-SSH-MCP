@@ -6,7 +6,8 @@
  * keep a single import site.
  */
 
-import { readFile, writeFile, rename, rm, mkdir, readdir, stat, chmod } from 'node:fs/promises'
+import { open, writeFile, rename, rm, mkdir, readdir, stat, chmod } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { parseTargets } from './target.js'
@@ -78,14 +79,44 @@ export async function saveTargetStore(file, targets) {
  * @param {string} file
  * @returns {Promise<import('./target.js').RemoteTarget[]>}
  */
-export async function readTargetStoreStrict(file) {
-  let raw
+const MAX_STORE_BYTES = 8 * 1024 * 1024
+
+/**
+ * Read a store file without blocking on/reading a planted FIFO or device.
+ * O_NONBLOCK + fstat regular-file check + a bounded read; ENOENT returns
+ * undefined (no store yet).
+ */
+async function readStoreFile(file) {
+  let handle
   try {
-    raw = await readFile(file, 'utf8')
+    handle = await open(file, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0))
   } catch (e) {
-    if (e?.code === 'ENOENT') return [] // no store yet: no targets
+    if (e?.code === 'ENOENT') return undefined
     throw e
   }
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) throw new Error(`target store ${file} is not a regular file; refusing to read it`)
+    if (info.size > MAX_STORE_BYTES) throw new Error(`target store ${file} is too large (limit ${MAX_STORE_BYTES} bytes)`)
+    const chunks = []
+    let total = 0
+    for (;;) {
+      const buf = Buffer.alloc(65536)
+      const { bytesRead } = await handle.read(buf, 0, buf.length, null)
+      if (bytesRead === 0) break
+      total += bytesRead
+      if (total > MAX_STORE_BYTES) throw new Error(`target store ${file} is too large (limit ${MAX_STORE_BYTES} bytes)`)
+      chunks.push(buf.subarray(0, bytesRead))
+    }
+    return Buffer.concat(chunks).toString('utf8')
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+export async function readTargetStoreStrict(file) {
+  const raw = await readStoreFile(file)
+  if (raw === undefined) return [] // no store yet: no targets
   let json
   try {
     // Strip a UTF-8 BOM: editors add one, JSON.parse rejects it, and the store

@@ -232,7 +232,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 `glob` 按 glob 模式匹配文件路径，不返回目录，结果按修改时间倒序，最多 100 项。`\` 转义下一个字符（`\*` 匹配字面 `*`，`\\` 匹配反斜杠），转义字符不计入预算；未闭合的 `{` 按字面处理，嵌套 `{...}` 会报错，字面 `{`/`}` 用 `\{`/`\}`。为避免正则回溯爆炸，一个模式最多包含 1 个 `**` 片段、4 个 `*`/`?` 通配符与 2 个 `{...}` 交替；超出会明确拒绝。模式不含 `/` 时匹配任意深度的文件名；`.git`、`.svn`、`.hg` 与 `node_modules` 目录会被跳过。结果在内部以 NUL 分隔，因此文件名中的换行不会破坏结构；无法用 UTF-8 表示的文件名会被跳过。文件名本身含换行时，返回文本会原样显示，阅读时可能看起来像两行。不可读的目录或不存在/非目录的路径会返回错误，而不是当作没有匹配。glob 与 grep 的 SSH 请求超时为 120 秒，不包含前置连接准备。
 
-`grep` 使用 POSIX 扩展正则搜索文件内容，按文件分组返回带行号的结果，最多 250 条，编码后的输出上限 512 KiB；超长行会被缩短并标注（不会拆开代理对），整个返回结果在本地截断前必须低于 4 MiB 传输上限；文件名不是合法 UTF-8 或无法解析的记录会被跳过并计数，匹配文本中的非 UTF-8 字节会显示为替换字符；文件名本身含换行时，返回文本同样可能看起来像多行。`include` 可用于限定文件名模式；`.git` 与 `node_modules` 目录以及二进制文件会被跳过。远程 `head` 缺少 `-z` 时会明确报错，而不是返回“无匹配”。
+`grep` 使用 POSIX 扩展正则搜索文件内容，按文件分组返回带行号的结果，最多 250 条，编码后的输出上限 512 KiB；超长行会被缩短并标注（不会拆开代理对），整个返回结果在本地截断前必须低于 4 MiB 传输上限（无效 UTF-8 字节替换为 U+FFFD 后膨胀超过 4 MiB 也按超限处理）；文件名不是合法 UTF-8 或无法解析的记录会被跳过并计数，匹配文本中的非 UTF-8 字节会显示为替换字符；文件名本身含换行时，返回文本同样可能看起来像多行。`include` 可用于限定文件名模式；`.git` 与 `node_modules` 目录以及二进制文件会被跳过。远程 `head` 缺少 `-z` 时会明确报错，而不是返回“无匹配”。
 
 ### 命令执行
 
@@ -309,7 +309,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | 变量 | 默认值 / 用途 |
 | --- | --- |
 | `REMOTE_SSH_TARGETS_FILE` | `~/.config/remote-ssh/targets.json`；`--targets` 优先 |
-| `REMOTE_SSH_CONTROL_DIR` | `~/.cache/remote-ssh/control`；目录权限 `0700`；路径不得包含空白、引号、`$`、`%`、`{` 或 `}`（OpenSSH `-o` 解析/展开限制） |
+| `REMOTE_SSH_CONTROL_DIR` | `~/.cache/remote-ssh/control`；目录权限 `0700`；路径不得包含空白、引号、`$`、`%`、`{`、`}` 或连续两个反斜杠（OpenSSH `-o` 解析/展开限制） |
 | `REMOTE_SSH_TERMINAL` | 终端启动命令；默认自动探测 |
 | `REMOTE_SSH_SUDO_CACHE_MS` | `1200000`（20 分钟）；sudo 密码在内存中的保留时间，`0` 关闭缓存；超过约 24.8 天时只有惰性清零 |
 | `REMOTE_SSH_CONNECT_TIMEOUT_MS` | `150000`；终端认证等待时间；正整数会夹取到 1000–150000 毫秒，非整数、`0`、负数或无效值回退到 `150000` |
@@ -319,7 +319,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | `REMOTE_SSH_LOCK_GRACE_MS` | `5000`；空锁被判定为过期前的宽限时间 |
 | `REMOTE_SSH_LOCK_RETRY_MS` | `50`；配置锁重试间隔 |
 
-SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径；该路径会作为 OpenSSH `-o ControlPath=` 的值重新解析，因此不能包含空白、引号、`$`、`%`、`{` 或 `}`。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`）。服务本身不转发环境变量；除非另行配置 ssh `SendEnv` 与 sshd `AcceptEnv`，在 MCP 进程环境中设置不会传到远端。
+SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径；该路径会作为 OpenSSH `-o ControlPath=` 的值重新解析，因此不能包含空白、引号、`$`、`%`、`{`、`}` 或连续两个反斜杠。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`）。服务本身不转发环境变量；除非另行配置 ssh `SendEnv` 与 sshd `AcceptEnv`，在 MCP 进程环境中设置不会传到远端。
 
 ## 测试
 

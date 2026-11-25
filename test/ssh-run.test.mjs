@@ -162,6 +162,7 @@ test('stdout truncated by U+FFFD expansion is flagged and capped', async () => {
       maxStdout: 1024,
     })
     assert.equal(result.stdoutTruncated, true)
+    assert.equal(result.stdoutRawTruncated, false, 'raw output was under the transport cap')
     assert.ok(Buffer.byteLength(result.stdout, 'utf8') <= 1024,
       `decoded stdout byte cap (${Buffer.byteLength(result.stdout)})`)
     assert.doesNotMatch(result.stdout, /HELLO_WORLD/)
@@ -357,10 +358,12 @@ test('host-key detection survives U+FFFD expansion outside the head', async () =
   process.env.FAKE_SSH_MID_STDERR = '1'
   try {
     setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+    assert.equal(sudoCacheSize(), 1)
     await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /host key verification failed/i)
     assert.equal(sudoCacheSize(), 0, 'sshExec detects the phrase before the decoded re-cap')
 
     setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+    assert.equal(sudoCacheSize(), 1)
     await assert.rejects(sshRun({ target: 'h', command: 'true', controlPersist: 0 }), /host key verification failed/i)
     assert.equal(sudoCacheSize(), 0, 'sshRun detects the phrase before the decoded re-cap')
   } finally {
@@ -411,6 +414,11 @@ test('an unsafe control directory is rejected before spawning ssh', async () => 
       /REMOTE_SSH_CONTROL_DIR/,
     )
     process.env.REMOTE_SSH_CONTROL_DIR = '/tmp/${HOME}/control'
+    await assert.rejects(
+      sshSpawn({ target: 'h', controlPersist: 43200 }, 'true'),
+      /REMOTE_SSH_CONTROL_DIR/,
+    )
+    process.env.REMOTE_SSH_CONTROL_DIR = '/tmp/a\\\\b'
     await assert.rejects(
       sshSpawn({ target: 'h', controlPersist: 43200 }, 'true'),
       /REMOTE_SSH_CONTROL_DIR/,

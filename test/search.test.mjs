@@ -70,11 +70,29 @@ test('grep refuses a transport-truncated structured result', async () => {
   process.env.FAKE_SSH_BIG = String(5 * 1024 * 1024)
   process.env.FAKE_SSH_MARK = '0'
   try {
-    await assert.rejects(makeGrepTool(target, '/remote').execute({ pattern: 'x' }, exec), /output exceeded the transport limit/)
+    await assert.rejects(makeGrepTool(target, '/remote').execute({ pattern: 'x' }, exec), /output exceeded the transport\/decoded limit/)
   } finally {
     delete process.env.FAKE_SSH_BIG
     delete process.env.FAKE_SSH_MARK
     await fake.cleanup()
+  }
+})
+
+test('grep rejects decoded-only truncation instead of misparsing records', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-decoded-'))
+  const previous = process.env.LC_ALL
+  process.env.LC_ALL = 'C'
+  try {
+    await writeFile(join(dir, 'weird.txt'), Buffer.concat([Buffer.from('hit'), Buffer.alloc(1_400_000, 0xff)]))
+    await writeFile(join(dir, 'small.txt'), 'hit\n')
+    await assert.rejects(makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+      .execute({ pattern: 'hit' }, exec), /transport\/decoded limit/)
+  } finally {
+    if (previous === undefined) delete process.env.LC_ALL
+    else process.env.LC_ALL = previous
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
   }
 })
 

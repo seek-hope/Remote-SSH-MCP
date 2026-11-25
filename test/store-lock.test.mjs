@@ -18,7 +18,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile, stat, chmod } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile, stat, chmod, symlink, lutimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withStoreLock, readTargetStoreStrict as readTargetStore, saveTargetStore, _lockTestHooks } from '../src/store.js'
@@ -717,7 +717,7 @@ test('a FIFO at the owner path is recovered without blocking', { skip: process.p
   const lock = `${file}.lock`
   try {
     await mkdir(lock)
-    spawnSync('mkfifo', [join(lock, 'owner')])
+    assert.equal(spawnSync('mkfifo', [join(lock, 'owner')]).status, 0)
     const old = new Date(Date.now() - 60_000)
     await utimes(lock, old, old)
     const started = Date.now()
@@ -729,7 +729,7 @@ test('a FIFO at the owner path is recovered without blocking', { skip: process.p
   }
 })
 
-test('a transient release read error is retried and the lock is removed', async () => {
+test('a transient release read error is retried and the lock is removed', { skip: process.getuid?.() === 0 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-store-release-retry-'))
   const file = join(dir, 'targets.json')
   const lock = `${file}.lock`
@@ -737,7 +737,7 @@ test('a transient release read error is retried and the lock is removed', async 
   try {
     const result = await withStoreLock(file, async () => {
       await chmod(owner, 0)
-      setTimeout(() => { chmod(owner, 0o644).catch(() => {}) }, 50)
+      setTimeout(() => { chmod(owner, 0o644).catch(() => {}) }, 10)
       return 'ok'
     }, { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
     assert.equal(result, 'ok')
@@ -753,9 +753,89 @@ test('an oversized owner record is treated as an ownerless husk', async () => {
   const lock = `${file}.lock`
   try {
     await mkdir(lock)
-    await writeFile(join(lock, 'owner'), 'x'.repeat(100_000))
+    // A VALID live record padded past 64 KiB: only the size cap makes it
+    // recoverable (uncapped it would be held by this process).
+    await writeFile(join(lock, 'owner'), JSON.stringify({
+      token: 'x', pid: process.pid, at: new Date().toISOString(), padding: 'x'.repeat(100_000),
+    }))
     const old = new Date(Date.now() - 60_000)
     await utimes(lock, old, old)
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a persistent release read error does not mask a committed result', { skip: process.platform !== 'linux' || process.getuid?.() === 0 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-release-mask-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  const owner = join(lock, 'owner')
+  try {
+    const result = await withStoreLock(file, async () => {
+      await chmod(owner, 0)
+      return 'ok'
+    }, { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok', 'a release failure must not mask the committed result')
+    await stat(lock) // the unreadable live lock remains for manual cleanup
+    await chmod(owner, 0o644)
+  } finally {
+    await chmod(owner, 0o644).catch(() => {})
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('lock creation is independent of a restrictive umask', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-umask-'))
+  const file = join(dir, 'targets.json')
+  const previous = process.umask(0o777)
+  try {
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+    await assert.rejects(stat(`${file}.lock`), /ENOENT/)
+  } finally {
+    process.umask(previous)
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a FIFO target store is rejected without blocking', { skip: process.platform !== 'linux' }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-fifo-read-'))
+  const file = join(dir, 'targets.json')
+  try {
+    assert.equal(spawnSync('mkfifo', [file]).status, 0)
+    const started = Date.now()
+    await assert.rejects(readTargetStore(file), /not a regular file/)
+    assert.ok(Date.now() - started < 2000)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a dangling symlink at the lock path is recovered', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-symlink-lock-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  try {
+    await symlink(join(dir, 'missing-target'), lock)
+    const old = new Date(Date.now() - 60_000)
+    await lutimes(lock, old, old)
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a symlink loop at the lock path is recovered', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-symlink-loop-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  try {
+    await symlink(lock, lock)
+    const old = new Date(Date.now() - 60_000)
+    await lutimes(lock, old, old)
     const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
     assert.equal(result, 'ok')
   } finally {
