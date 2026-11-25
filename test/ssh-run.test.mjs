@@ -100,3 +100,26 @@ test('a host-key failure clears the destination sudo cache', async () => {
     await fake.cleanup()
   }
 })
+
+test('sshRun timeout settles even when a local descendant holds stderr', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_MARK = '0'
+  process.env.FAKE_SSH_HOLD_STDERR = '1'
+  const started = Date.now()
+  try {
+    const result = await sshRun({ target: 'h', command: 'true', timeoutMs: 300 })
+    assert.equal(result.timedOut, true)
+  } finally {
+    delete process.env.FAKE_SSH_MARK
+    delete process.env.FAKE_SSH_HOLD_STDERR
+    await fake.cleanup()
+  }
+  assert.ok(Date.now() - started < 2000, `sshRun settled after ${Date.now() - started}ms`)
+})
+
+test('the transport rejects NUL bytes and unpaired surrogates in a command', async () => {
+  await assert.rejects(sshSpawn({ target: 'h', controlPersist: 0 }, 'echo \0'), /NUL/)
+  await assert.rejects(sshSpawn({ target: 'h', controlPersist: 0 }, 'echo \ud800'), /surrogate/)
+  const spec = await sshSpawn({ target: 'h', controlPersist: 0 }, 'echo 😀')
+  assert.ok(spec.args.at(-1).includes('base64'))
+})

@@ -224,8 +224,10 @@ def main():
         'lost')
     offset = request.get('offset', 0)
     limit = request.get('limit', 65536)
-    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 65536:
-        raise ValueError('Invalid output offset or limit')
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 4 <= limit <= 65536:
+        # At least one full UTF-8 character: a smaller page could never emit a
+        # leading multi-byte character and next_offset would not advance.
+        raise ValueError('Invalid output offset or limit (limit must be between 4 and 65536)')
     # Keep a UTF-8 character split at a page boundary for the next page: read
     # only complete characters and let next_offset point at the pending bytes.
     # A running (or lost) job may still append the rest of the character, so

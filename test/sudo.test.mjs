@@ -33,7 +33,7 @@ test.beforeEach(() => {
 async function harness(options = {}) {
   const ssh = await installLocalSsh()
   const sudo = await installFakeSudo({ dir: ssh.dir, ...options })
-  const term = await installFakeTerminal({ password: options.terminalPassword ?? options.password ?? 'fakepw' })
+  const term = await installFakeTerminal({ password: options.terminalPassword ?? options.password ?? 'fakepw', delayMs: options.terminalDelayMs ?? 0 })
   return {
     ssh,
     sudo,
@@ -462,6 +462,22 @@ test('a command that prints its own cmdline is not misreported as a cd failure',
     const result = await run({ command: "tr '\\0' '\\n' < /proc/$$/cmdline >&2; echo COMMAND_RAN" })
     assert.equal(result.ok, true, JSON.stringify(result))
     assert.match(result.stdout, /COMMAND_RAN/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a short-budget waiter does not abort a shared prompt for a longer caller', async () => {
+  const h = await harness({ password: 'fakepw', terminalDelayMs: 1500 })
+  try {
+    const [short, long] = await Promise.all([
+      run({ timeoutMs: 500 }),
+      run({ timeoutMs: 10_000 }),
+    ])
+    assert.equal(short.ok, false)
+    assert.match(short.error, /no sudo password/)
+    assert.equal(long.ok, true, JSON.stringify(long))
+    assert.equal((await h.term.readLog()).length, 1, 'one shared prompt served both callers')
   } finally {
     await h.cleanup()
   }

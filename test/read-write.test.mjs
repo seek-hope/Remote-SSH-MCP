@@ -151,3 +151,10 @@ test('read rejects a FIFO without blocking and writes follow symlinks', async ()
   assert.equal(await readFile(target, 'utf8'), 'new')
   assert.equal((await lstat(link)).isSymbolicLink(), true)
 }))
+
+test('a path with an unpaired surrogate is rejected before execution', async () => fixture(async ({ write }) => {
+  await assert.rejects(
+    write.execute({ file_path: 'bad\ud800.txt', content: 'x' }, {}),
+    /surrogate/,
+  )
+}))

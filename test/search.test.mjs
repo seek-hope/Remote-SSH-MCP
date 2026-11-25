@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GLOB_PY, makeGrepTool } from '../src/tools/search.js'
-import { installFakeSsh, remoteCommand } from './helpers.mjs'
+import { installFakeSsh, installLocalSsh, remoteCommand } from './helpers.mjs'
 
 const target = { ssh: 'h', name: 'h', controlPersist: 0 }
 const exec = { signal: new AbortController().signal }
@@ -100,6 +100,63 @@ test('grep keeps a filename containing a newline as one record', async () => {
     assert.match(out, /dir\/foo\nbar\.txt\n5:hit/, out)
     assert.ok(!out.startsWith('bar.txt\n5:hit'), 'the suffix of a newline filename must not become a file')
     assert.ok(!out.includes('\n\nbar.txt\n5:hit'), 'no bogus separate group for the filename suffix')
+  } finally {
+    delete process.env.FAKE_SSH_STDOUT
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+})
+
+test('grep with >250 newline-named matches reports the cap instead of silently truncating', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-newline-'))
+  try {
+    for (let i = 0; i < 300; i++) {
+      await writeFile(join(dir, `f${String(i).padStart(3, '0')}\nname.txt`), 'hit\n')
+    }
+    const out = await makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+      .execute({ pattern: 'hit' }, exec)
+    assert.match(out, /truncated at 250 matches/)
+    assert.equal(out.split('\n').filter(line => line === '1:hit').length, 250)
+  } finally {
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('glob keeps older representable paths when newer names are not UTF-8', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-utf8-'))
+  try {
+    for (let i = 0; i < 100; i++) {
+      const path = Buffer.concat([
+        Buffer.from(join(dir, `bad${String(i).padStart(3, '0')}-`)),
+        Buffer.from([0xff]),
+        Buffer.from('.txt'),
+      ])
+      await writeFile(path, '')
+      const time = 1700001000 + i
+      await utimes(path, time, time)
+    }
+    await writeFile(join(dir, 'older-valid.txt'), '')
+    await utimes(join(dir, 'older-valid.txt'), 1700000000, 1700000000)
+    const out = execFileSync('python3', ['-c', GLOB_PY, '*.txt', dir, '100'], { encoding: 'utf8' })
+    const parts = out.split('\0')
+    assert.equal((parts.pop() ?? '').trim(), '__REMOTE_SSH_TOTAL__101')
+    assert.deepEqual(parts.filter(Boolean), [join(dir, 'older-valid.txt')])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('grep line shortening does not split a surrogate pair', async () => {
+  const fake = await installFakeSsh()
+  const line = 'a'.repeat(8191) + '😀' + 'tail'
+  process.env.FAKE_SSH_STDOUT = `dir/f.txt__NUL__1:${line}\n`
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    const out = await makeGrepTool(target, '/remote').execute({ pattern: 'x' }, exec)
+    assert.match(out, /\[line truncated\]/)
+    assert.ok(!out.includes('\ud83d'), 'no lone high surrogate at the cut')
   } finally {
     delete process.env.FAKE_SSH_STDOUT
     delete process.env.FAKE_SSH_MARK

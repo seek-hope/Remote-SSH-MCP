@@ -76,10 +76,17 @@ for dirpath, dirnames, filenames in os.walk(root):
                 mtime = os.path.getmtime(full)
             except OSError:
                 mtime = 0.0
+            total += 1
+            try:
+                full.encode('utf-8')
+            except UnicodeEncodeError:
+                # Keep the match in the total, but choose the top-k from names
+                # the text transport can represent, so an older representable
+                # file is not evicted by newer unrepresentable ones.
+                continue
             # Keep only the best cap entries. The sequence breaks equal-mtime
             # ties in the same traversal order as the previous stable sort.
             item = (mtime, -total, full)
-            total += 1
             if len(results) < cap:
                 heapq.heappush(results, item)
             elif item > results[0]:
@@ -130,12 +137,12 @@ export function makeGlobTool(target, cwd = target.root) {
       const total = parseInt(marker.slice('__REMOTE_SSH_TOTAL__'.length), 10)
       if (paths.length === 0) {
         if (Number.isFinite(total) && total > 0) {
-          return `${total} path(s) matched "${a.pattern}" under ${root}, but none of the selected newest names is representable as UTF-8.`
+          return `${total} path(s) matched "${a.pattern}" under ${root}, but none is representable as UTF-8.`
         }
         return `No files matched "${a.pattern}" under ${root} (remote host ${target.name}).`
       }
       const header = Number.isFinite(total) && total > paths.length
-        ? `Showing ${paths.length} of ${total} matches (mtime order, capped).`
+        ? `Showing ${paths.length} of ${total} matches (newest representable paths; non-UTF-8 names are skipped).`
         : `${paths.length} match${paths.length === 1 ? '' : 'es'}.`
       return `${header}\n${paths.join('\n')}`
     },
@@ -145,7 +152,7 @@ export function makeGlobTool(target, cwd = target.root) {
 export function makeGrepTool(target, cwd = target.root) {
   return defTextTool({
     name: 'grep',
-    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches and 512 KiB of encoded output; very long lines are shortened. The remote host must run Linux. REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
+    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches and 512 KiB of encoded output; very long lines are shortened without splitting surrogate pairs. The remote host must run Linux with GNU grep and coreutils 8.25+ (head -z). REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {
@@ -160,7 +167,11 @@ export function makeGrepTool(target, cwd = target.root) {
       const root = resolveRemote(a.path ?? '.', cwd)
       const include = a.include ? ` --include=${shq(a.include)}` : ''
       // Keep grep errors distinct from no matches; SIGPIPE is expected at the cap.
-      const search = `grep -rHInE --null${include} --exclude-dir=.git --exclude-dir=node_modules -e ${shq(a.pattern)} -- ${shq(root)} | head -n ${GREP_CAP + 1}; rc=\${PIPESTATUS[0]}; [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || [ "$rc" -eq 141 ]`
+      // `head -n` counts newlines, and a filename may contain one; use NUL
+      // records so 251 complete `filename\0line:text\n` records are passed
+      // (the 251st NUL terminates the sentinel filename, preserving the cap
+      // signal even when it is unparseable or non-UTF-8).
+      const search = `grep -rHInE --null${include} --exclude-dir=.git --exclude-dir=node_modules -e ${shq(a.pattern)} -- ${shq(root)} | head -z -n ${GREP_CAP + 1}; rc=\${PIPESTATUS[0]}; [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || [ "$rc" -eq 141 ]`
       const script = [
         `if [ ! -e ${shq(root)} ]; then echo "__REMOTE_SSH_ERR__:no-such-path"`,
         `else bash -c ${shq(search)}; fi`,
@@ -210,7 +221,14 @@ export function makeGrepTool(target, cwd = target.root) {
           malformed += 1
           continue
         }
-        const text = m[2].length > MAX_GREP_LINE_CHARS ? `${m[2].slice(0, MAX_GREP_LINE_CHARS)}...[line truncated]` : m[2]
+        let text = m[2]
+        if (text.length > MAX_GREP_LINE_CHARS) {
+          let cut = MAX_GREP_LINE_CHARS
+          const last = text.charCodeAt(cut - 1)
+          // Do not split a surrogate pair at the shortening boundary.
+          if (last >= 0xd800 && last <= 0xdbff) cut -= 1
+          text = `${text.slice(0, cut)}...[line truncated]`
+        }
         const record = `${m[1]}:${text}`
         const cost = Buffer.byteLength(JSON.stringify(file)) + Buffer.byteLength(JSON.stringify(record)) + 4
         if (bytes + cost > MAX_GREP_BYTES) {

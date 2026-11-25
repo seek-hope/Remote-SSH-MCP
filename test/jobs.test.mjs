@@ -236,3 +236,70 @@ test('a v2 job with an exit file stays completed and cleanable', linux, async ()
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('job_output requires a limit that can advance over a multi-byte character', linux, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-limit-'))
+  const env = { ...process.env, REMOTE_SSH_JOB_DIR: join(dir, 'jobs') }
+  const job_id = randomUUID()
+  const job = join(env.REMOTE_SSH_JOB_DIR, job_id)
+  const call = async request => {
+    const proc = exec('python3', [script], { env, timeout: 10000 })
+    proc.child.stdin.end(JSON.stringify(request))
+    return JSON.parse((await proc).stdout)
+  }
+  try {
+    await mkdir(job, { recursive: true })
+    await writeFile(join(job, 'out'), '😀x')
+    await writeFile(join(job, 'state.json'), JSON.stringify({ pid: 999999, stamp: '0', version: 3 }))
+    await writeFile(join(job, 'exit'), '0')
+    await writeFile(join(job, 'done'), '')
+    await assert.rejects(call({ action: 'output', job_id, limit: 1 }), /limit must be between 4 and 65536/)
+    const first = await call({ action: 'output', job_id, limit: 4 })
+    assert.equal(first.output, '😀')
+    assert.equal(first.next_offset, 4)
+    assert.equal(first.has_more, true)
+    const rest = await call({ action: 'output', job_id, offset: first.next_offset, limit: 4 })
+    assert.equal(rest.output, 'x')
+    assert.equal(rest.has_more, false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a v3 job with an exit file but no done marker is lost and refuses cleanup', linux, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-nodone-'))
+  const env = { ...process.env, REMOTE_SSH_JOB_DIR: join(dir, 'jobs') }
+  const job_id = randomUUID()
+  const job = join(env.REMOTE_SSH_JOB_DIR, job_id)
+  const call = async request => {
+    const proc = exec('python3', [script], { env, timeout: 10000 })
+    proc.child.stdin.end(JSON.stringify(request))
+    return JSON.parse((await proc).stdout)
+  }
+  try {
+    await mkdir(job, { recursive: true })
+    await writeFile(join(job, 'out'), 'x')
+    await writeFile(join(job, 'state.json'), JSON.stringify({ pid: 999999, stamp: '0', version: 3 }))
+    await writeFile(join(job, 'exit'), '0')
+    const out = await call({ action: 'output', job_id })
+    assert.equal(out.status, 'lost')
+    assert.equal(out.worker_missing, true)
+    await assert.rejects(call({ action: 'output', job_id, cleanup: true }), /lost job/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a set -m descendant in the same session keeps the job running and is killed', linux, async () => fixture(async ({ invoke, job_id, dir }) => {
+  assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'set -m; sleep 3 &' })).status, 'started')
+  let status
+  for (let i = 0; i < 50; i++) {
+    const out = await invoke({ action: 'output', job_id, limit: 8 })
+    status = out.status
+    if (status !== 'running') break
+    await delay(20)
+  }
+  assert.equal(status, 'running')
+  assert.equal((await invoke({ action: 'kill', job_id })).status, 'killed')
+  await until(async () => (await invoke({ action: 'output', job_id, limit: 8 })).status === 'killed')
+}))

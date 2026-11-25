@@ -101,12 +101,29 @@ function controlArgs(opts) {
   ]
 }
 
+/** The shell transport is text: NUL and unpaired surrogates would be mutated. */
+function assertTextCommand(command) {
+  if (typeof command !== 'string') throw new Error('sshSpawn: command must be a string')
+  if (command.includes('\0')) throw new Error('remote command contains a NUL byte, which the shell transport would drop')
+  for (let i = 0; i < command.length; i++) {
+    const code = command.charCodeAt(i)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = command.charCodeAt(i + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error('remote command contains an unpaired UTF-16 surrogate')
+      i += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw new Error('remote command contains an unpaired UTF-16 surrogate')
+    }
+  }
+}
+
 /** Tool processes never prompt; authentication happens only in a terminal. */
 export async function sshSpawn(opts, command) {
   const { target, port, controlPersist } = opts
   if (typeof target !== 'string' || !target || target.startsWith('-') || /[\s\0]/.test(target)) {
     throw new Error(`sshSpawn: target must be a non-empty ssh destination string (received ${typeof target})`)
   }
+  assertTextCommand(command)
   const ctl = controlArgs({ controlPersist })
   if (effectiveControlPersist({ controlPersist }) > 0) await ensureControlDir()
   const portOptionArgs = portArgs({ port })
@@ -259,17 +276,26 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wip
     let timedOut = false
     let settled = false
     const kill = () => { try { child.kill('SIGKILL') } catch {} }
+    // A local descendant (ProxyCommand/ProxyJump) may inherit and hold the
+    // stdio pipes after the direct ssh process dies; 'close' would then wait
+    // for EOF forever. Destroying the read ends lets close settle once the
+    // process is reaped, honoring the timeout/abort budget.
+    const releasePipes = () => {
+      try { child.stdout?.destroy() } catch { /* already closed */ }
+      try { child.stderr?.destroy() } catch { /* already closed */ }
+    }
     const finish = (fn, val) => {
       if (settled) return
       settled = true
       cleanup()
       fn(val)
     }
-    const onAbort = () => { kill(); finish(reject, new Error('aborted')) }
+    const onAbort = () => { kill(); releasePipes(); finish(reject, new Error('aborted')) }
     const timer = timeoutMs > 0
       ? setTimeout(() => {
           timedOut = true
           kill()
+          releasePipes()
           if (onTimeout) finish(reject, onTimeout())
         }, timeoutMs)
       : undefined

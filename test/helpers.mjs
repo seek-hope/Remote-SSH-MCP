@@ -37,6 +37,13 @@ if (failMatch && (argv.join('\\n') + '\\n' + wrapped).includes(failMatch)) {
   if (process.env.FAKE_SSH_FAIL_STDERR) fs.writeSync(2, process.env.FAKE_SSH_FAIL_STDERR)
   process.exit(Number(process.env.FAKE_SSH_FAIL_EXIT || '1'))
 }
+// A local descendant that inherits stderr and outlives ssh keeps the pipe
+// open; used to prove timeouts still settle.
+if (process.env.FAKE_SSH_HOLD_STDERR) {
+  const { spawn } = require('node:child_process')
+  const holder = spawn('sleep', ['2'], { stdio: ['ignore', 'ignore', 'inherit'] })
+  holder.unref()
+}
 const big = Number(process.env.FAKE_SSH_BIG || '0')
 if (big > 0) {
   const chunk = Buffer.alloc(65536, 0x41)
@@ -146,11 +153,12 @@ child.on('close', (code) => process.exit(code ?? 1))
  * code); every invocation is logged so tests can assert that a cached
  * credential avoided another prompt.
  */
-export async function installFakeTerminal({ password = 'fakepw' } = {}) {
+export async function installFakeTerminal({ password = 'fakepw', delayMs = 0 } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-fake-terminal-'))
   const bin = join(dir, 'terminal.sh')
   const log = join(dir, 'invocations.log')
-  await writeFile(bin, `#!/usr/bin/env bash\ncmd="\${@: -1}"\nprintf 'prompt\\n' >> ${JSON.stringify(log)}\nprintf '%s\\n' "$FAKE_TERMINAL_PASSWORD" | /bin/bash -c "$cmd"\n`)
+  const delay = (Math.max(0, Number(delayMs) || 0) / 1000).toFixed(3)
+  await writeFile(bin, `#!/usr/bin/env bash\ncmd="\${@: -1}"\nsleep ${delay}\nprintf 'prompt\\n' >> ${JSON.stringify(log)}\nprintf '%s\\n' "$FAKE_TERMINAL_PASSWORD" | /bin/bash -c "$cmd"\n`)
   await chmod(bin, 0o700)
   const previousTerminal = process.env.REMOTE_SSH_TERMINAL
   const previousPassword = process.env.FAKE_TERMINAL_PASSWORD

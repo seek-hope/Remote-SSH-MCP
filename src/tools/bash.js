@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { sshExec, sshRun, shq } from '../ssh.js'
 import { resolveRemote } from '../target.js'
 import { checkArgs, defTextTool } from '../toolkit.js'
+import { hasBinaryContent } from './files.js'
 
 const JOB_SCRIPT = readFileSync(new URL('../jobs.py', import.meta.url), 'utf8')
 
@@ -18,7 +19,7 @@ export async function remoteJob(target, request, signal) {
 export function makeBashTool(target, cwd = target.root) {
   return defTextTool({
     name: 'bash',
-    description: 'Execute bash on the selected remote host. Each call starts a fresh shell. Commands have the SSH account permissions. Background jobs return a job_id; use job_output/job_kill with the same target. If a launch error includes a job_id, query it before retrying to avoid duplicate execution. A foreground command whose encoded script exceeds 96 KiB in one ssh argument is rejected; use run_in_background or write the script to a file and run it. Remote Linux requires bash and python3.',
+    description: 'Execute bash on the selected remote host. Each call starts a fresh shell. Commands have the SSH account permissions and must be UTF-8 text without NUL bytes or unpaired surrogates. Background jobs return a job_id; use job_output/job_kill with the same target. If a launch error includes a job_id, query it before retrying to avoid duplicate execution. A foreground command whose encoded script exceeds 96 KiB in one ssh argument is rejected; use run_in_background or write the script to a file and run it. Remote Linux requires bash and python3.',
     parameters: {
       type: 'object',
       properties: {
@@ -32,6 +33,7 @@ export function makeBashTool(target, cwd = target.root) {
     },
     async execute(args, exec) {
       const a = checkArgs('bash', args, { command: 'string', description: '?string', workdir: '?string', timeoutMs: '?integer', run_in_background: '?boolean' })
+      if (hasBinaryContent(a.command)) throw new Error('bash: command must be UTF-8 text without NUL bytes or unpaired surrogates')
       const dir = resolveRemote(a.workdir ?? '.', cwd)
       if (a.run_in_background) {
         const job_id = randomUUID()

@@ -72,8 +72,8 @@ MCP 客户端通过 stdio 调用 `cli.js`。`server.js` 注册工具、校验参
 
 ### 本机
 
-- Node.js 20 或更高版本
-- OpenSSH 客户端
+- Node.js 20.11 或更高版本
+- OpenSSH 6.8 或更高版本（`ssh -G`；共享 ControlMaster 使用 `ControlPath %C`）
 - 用于交互式认证的图形会话（无图形会话时需配置免交互认证）
 - 本机 `bash`（终端认证命令与 sudo 密码提示脚本使用；macOS 自带的 3.2 即可）
 - Linux 桌面或 macOS；Windows 需在 WSL 中运行，并配置可用的终端启动命令
@@ -83,7 +83,7 @@ MCP 客户端通过 stdio 调用 `cli.js`。`server.js` 注册工具、校验参
 - Linux
 - bash 与 POSIX `sh`
 - Python 3.9 或更高版本
-- GNU 常用工具，包括 `base64` 与 `grep`
+- GNU coreutils 8.25 或更高版本（grep 管道使用 `head -z`）、`base64` 与 `grep`
 - 后台任务依赖 Linux `/proc`
 - `sudo` 工具要求远端允许无 tty 执行 sudo（sudoers 未启用 `requiretty`）；密码路径要求 `timestamp_timeout` 非 0，免密路径要求 `NOPASSWD` 覆盖 `sudo -n -v` 与包装命令 `bash`（通常是 `NOPASSWD: ALL`）
 
@@ -222,7 +222,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 {"target":"gpu","file_path":"README.md","offset":1,"limit":100}
 ```
 
-`read` 单次最多返回 2000 个完整行和 1 MiB。文件不超过 8 MiB 时返回精确总行数；更大的文件通常只扫描到请求窗口结束并返回 `total_lines: null`，若请求窗口已到达文件末尾则仍返回精确总数。因字节上限提前结束时，末尾会提示截断并给出准确的续读 `offset`，不会把截断后的首个完整行标成错误的行号；单行超过 1 MiB 时，如果它是返回窗口的第一行则拒绝读取并提示改用 `bash`，否则窗口在该行前停止并标记截断。FIFO/设备/目录等非普通文件在打开前被拒绝，不会卡住。输出经过尾部截断的传输错误会被明确标记，不会当作完整内容返回。
+`read` 单次最多返回 2000 个完整行和 1 MiB。文件不超过 8 MiB 时返回精确总行数；更大的文件通常只扫描到请求窗口结束并返回 `total_lines: null`，若请求窗口已到达文件末尾则仍返回精确总数。因字节上限提前结束时，末尾会提示截断并给出准确的续读 `offset`，不会把截断后的首个完整行标成错误的行号；单行（含换行符）超过 1 MiB 时，如果它是返回窗口的第一行则拒绝读取并提示改用 `bash`，否则窗口在该行前停止并标记截断。FIFO/设备/目录等非普通文件在打开前被拒绝，不会卡住。输出经过尾部截断的传输错误会被明确标记，不会当作完整内容返回。
 
 `write` 创建或完整覆盖文件，父目录会自动创建。内容以原始字节经 stdin 上传，远端在替换前校验字节数与 SHA-256；提前 EOF、多余字节或等长损坏都会失败，原文件保持不变。替换时先写同目录临时文件再原子改名，新文件权限为 `0600`，已有文件保留原权限位，权限复制失败即中止。符号链接会被跟随（写入真实目标，链接本身保留）；已存在的非普通文件会被拒绝。内容上限为 8 MiB 的 JSON 编码请求（MCP stdio 单条消息上限 10 MiB）。这只是原子替换与上传完整性校验，不是文件锁，也不保证掉电后的持久性。
 
@@ -232,7 +232,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 `glob` 按 glob 模式匹配文件路径，不返回目录，结果按修改时间倒序，最多 100 项。模式不含 `/` 时匹配任意深度的文件名；`.git`、`.svn`、`.hg` 与 `node_modules` 目录会被跳过。结果在内部以 NUL 分隔，因此文件名中的换行不会破坏结构；无法用 UTF-8 表示的文件名会被跳过。文件名本身含换行时，返回文本会原样显示，阅读时可能看起来像两行。
 
-`grep` 使用 POSIX 扩展正则搜索文件内容，按文件分组返回带行号的结果，最多 250 条，编码后的输出上限 512 KiB；超长行会被缩短并标注，整个返回结果在本地截断前必须低于 4 MiB 传输上限；文件名不是合法 UTF-8 或无法解析的记录会被跳过并计数。`include` 可用于限定文件名模式；`.git` 与 `node_modules` 目录以及二进制文件会被跳过。
+`grep` 使用 POSIX 扩展正则搜索文件内容，按文件分组返回带行号的结果，最多 250 条，编码后的输出上限 512 KiB；超长行会被缩短并标注（不会拆开代理对），整个返回结果在本地截断前必须低于 4 MiB 传输上限；文件名不是合法 UTF-8 或无法解析的记录会被跳过并计数，匹配文本中的非 UTF-8 字节会显示为替换字符。`include` 可用于限定文件名模式；`.git` 与 `node_modules` 目录以及二进制文件会被跳过。
 
 ### 命令执行
 
@@ -280,7 +280,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 {"target":"gpu","job_id":"<job_id>","offset":0,"limit":65536}
 ```
 
-结果包含 `status`、`exit_code`、`output`、`next_offset` 与 `has_more`，输出合并 stdout 与 stderr。`offset` 是从 0 开始的字节偏移，不是行号；`limit` 以字节计，默认及上限均为 65536。将 `next_offset` 作为下一次调用的 `offset` 可无重复地继续读取；跨页的多字节 UTF-8 字符会留到下一页，不会被替换成 U+FFFD。`has_more: false` 只表示当前没有更多输出，并不表示任务已经结束，应同时检查 `status` 和 `exit_code`。
+结果包含 `status`、`exit_code`、`output`、`next_offset` 与 `has_more`，输出合并 stdout 与 stderr。`offset` 是从 0 开始的字节偏移，不是行号；`limit` 以字节计，最小 4（保证至少一个完整 UTF-8 字符，`next_offset` 总能前进），默认及上限均为 65536。将 `next_offset` 作为下一次调用的 `offset` 可无重复地继续读取；跨页的多字节 UTF-8 字符会留到下一页，不会被替换成 U+FFFD。`has_more: false` 只表示当前没有更多输出，并不表示任务已经结束，应同时检查 `status` 和 `exit_code`。
 
 后台模式忽略 `bash.timeoutMs`，任务本身没有运行时限；启动、查询与终止任务的 SSH 请求超时均为 120 秒，不包含前置连接准备。如果启动失败信息中包含 `job_id`，应先查询该 ID，避免重复启动。
 
