@@ -569,3 +569,18 @@ test('an orphaned gate-staging directory older than the grace is swept during re
   assert.ok(!(await readdir(dir)).includes('targets.json.lock.recover.staging.dead.token'), 'aged gate-staging dir was swept')
   await rm(dir, { recursive: true, force: true })
 })
+
+test('a target store with a UTF-8 BOM is accepted', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-bom-'))
+  const file = join(dir, 'targets.json')
+  try {
+    await writeFile(file, '\uFEFF[{"name":"h","ssh":"h","root":"/"}]\n')
+    const targets = await readTargetStore(file)
+    assert.equal(targets.length, 1)
+    assert.equal(targets[0].name, 'h')
+    await saveTargetStore(file, targets)
+    assert.equal((await readTargetStore(file))[0].ssh, 'h')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

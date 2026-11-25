@@ -100,13 +100,40 @@ export async function installFakeSsh() {
 /** Execute the generated remote command locally, only for temp-directory tests. */
 export async function installLocalSsh() {
   const fake = await installFakeSsh()
+  // A faithful stand-in for sshd's session stdin: Node's own stdio "pipe" is a
+  // socketpair (reopening it via /proc fails with ENXIO), while a real remote
+  // shell gets an OS pipe. The bridge copies the socketpair through os.pipe().
+  const bridge = join(fake.dir, 'bridge.py')
+  await writeFile(bridge, `import os, subprocess, sys
+cmd = sys.argv[1]
+r, w = os.pipe()
+child = subprocess.Popen(['sh', '-c', cmd], stdin=r)
+os.close(r)
+try:
+    while True:
+        data = os.read(0, 65536)
+        if not data:
+            break
+        os.write(w, data)
+finally:
+    os.close(w)
+sys.exit(child.wait())
+`)
   await writeFile(join(fake.dir, 'ssh'), `#!${process.execPath}
 const fs = require('node:fs')
-const { spawnSync } = require('node:child_process')
+const { spawn } = require('node:child_process')
 const argv = process.argv.slice(2)
 if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
-const result = spawnSync('sh', ['-c', argv.at(-1)], { stdio: 'inherit' })
-process.exit(result.status ?? 1)
+if (argv.includes('-G')) {
+  const host = process.env.FAKE_SSH_IDENTITY_HOST || 'h'
+  const user = process.env.FAKE_SSH_IDENTITY_USER || 'testuser'
+  const port = process.env.FAKE_SSH_IDENTITY_PORT || '22'
+  process.stdout.write('hostname ' + host + '\\nuser ' + user + '\\nport ' + port + '\\n')
+  process.exit(0)
+}
+const child = spawn('python3', [${JSON.stringify(bridge)}, argv.at(-1)], { stdio: 'inherit' })
+child.on('error', () => process.exit(1))
+child.on('close', (code) => process.exit(code ?? 1))
 `, { mode: 0o755 })
   return fake
 }
@@ -114,22 +141,169 @@ process.exit(result.status ?? 1)
 /**
  * installFakeTerminal — replaces REMOTE_SSH_TERMINAL with a launcher that runs
  * the generated terminal command and feeds `password` on its stdin, so the
- * sudo flow can run without a desktop session. The password is only ever held
- * by the fake terminal, never by the caller.
+ * sudo flow can run without a desktop session. The password is passed through
+ * the environment (never written into the script or interpolated into shell
+ * code); every invocation is logged so tests can assert that a cached
+ * credential avoided another prompt.
  */
 export async function installFakeTerminal({ password = 'fakepw' } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-fake-terminal-'))
   const bin = join(dir, 'terminal.sh')
-  await writeFile(bin, `#!/usr/bin/env bash\ncmd="\${@: -1}"\nprintf '%s\\n' ${JSON.stringify(password)} | bash -c "$cmd"\n`)
-  await chmod(bin, 0o755)
-  const previous = process.env.REMOTE_SSH_TERMINAL
+  const log = join(dir, 'invocations.log')
+  await writeFile(bin, `#!/usr/bin/env bash\ncmd="\${@: -1}"\nprintf 'prompt\\n' >> ${JSON.stringify(log)}\nprintf '%s\\n' "$FAKE_TERMINAL_PASSWORD" | /bin/bash -c "$cmd"\n`)
+  await chmod(bin, 0o700)
+  const previousTerminal = process.env.REMOTE_SSH_TERMINAL
+  const previousPassword = process.env.FAKE_TERMINAL_PASSWORD
   process.env.REMOTE_SSH_TERMINAL = `bash ${bin}`
+  process.env.FAKE_TERMINAL_PASSWORD = password
   return {
     dir,
+    log,
+    async readLog() {
+      try {
+        const raw = await readFile(log, 'utf8')
+        return raw.trim().split('\n').filter(Boolean)
+      } catch {
+        return []
+      }
+    },
     async cleanup() {
-      if (previous === undefined) delete process.env.REMOTE_SSH_TERMINAL
-      else process.env.REMOTE_SSH_TERMINAL = previous
+      if (previousTerminal === undefined) delete process.env.REMOTE_SSH_TERMINAL
+      else process.env.REMOTE_SSH_TERMINAL = previousTerminal
+      if (previousPassword === undefined) delete process.env.FAKE_TERMINAL_PASSWORD
+      else process.env.FAKE_TERMINAL_PASSWORD = previousPassword
       await rm(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+/**
+ * A fake sudo for tests that execute the real remote wrapper locally
+ * (installLocalSsh). It emulates the two v-modes and runs the command the
+ * service asks sudo to run:
+ *   - `-n -v` succeeds only with FAKE_SUDO_TICKET=1, or after a successful
+ *     `-S -v` (tracked by a state file);
+ *   - `-S -v` reads one password line and compared it with FAKE_SUDO_PASSWORD;
+ *     FAKE_SUDO_SKIP_READ simulates NOPASSWD (success without reading);
+ *   - `-n -- <argv>` execs the command.
+ * FAKE_SUDO_POLICY makes every invocation a policy refusal.
+ */
+const FAKE_SUDO = `#!/bin/bash
+logline="$*"
+printf '%s\\n' "\${logline//$'\\n'/ }" >> "$FAKE_SUDO_LOG"
+readflag=0; nflag=0; vflag=0
+for arg in "$@"; do
+  if [ "$arg" = "--" ]; then break; fi
+  case "$arg" in
+    -S) readflag=1 ;;
+    -n) nflag=1 ;;
+    -v) vflag=1 ;;
+  esac
+done
+# Timestamps are keyed by the parent shell, like sudo's no-tty fallback: the
+# state only matches within the same remote shell, never across SSH calls.
+# Per-parent files keep concurrent wrappers from clobbering each other.
+statefile="$FAKE_SUDO_STATE.$PPID"
+ticket() { [ -f "$statefile" ]; }
+if [ "\${FAKE_SUDO_POLICY:-0}" = 1 ]; then
+  printf 'sudo: user is not in the sudoers file.  This incident will be reported.\\n' >&2
+  exit 1
+fi
+if [ "$vflag" = 1 ]; then
+  if [ "$readflag" = 1 ]; then
+    if [ "\${FAKE_SUDO_SKIP_READ:-0}" = 1 ]; then : > "$statefile"; exit 0; fi
+    if ! IFS= read -r pw; then printf 'sudo: no password read\\n' >&2; exit 1; fi
+    if [ "$pw" = "\${FAKE_SUDO_PASSWORD:-}" ]; then : > "$statefile"; exit 0; fi
+    printf 'sudo: 1 incorrect password attempt\\n' >&2
+    exit 1
+  fi
+  if ticket; then
+    if [ "\${FAKE_SUDO_NO_TICKET:-0}" = 1 ]; then printf 'sudo: a password is required\\n' >&2; exit 1; fi
+    exit 0
+  fi
+  if [ "\${FAKE_SUDO_FAIL_AFTER_PROBE:-0}" = 1 ]; then
+    counter="$FAKE_SUDO_STATE.count"
+    n=$(cat "$counter" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s' "$n" > "$counter"
+    if [ "$n" -gt 1 ]; then printf 'sudo: a password is required\\n' >&2; exit 1; fi
+  fi
+  if [ "\${FAKE_SUDO_TICKET:-0}" = 1 ]; then : > "$statefile"; exit 0; fi
+  printf 'sudo: a password is required\\n' >&2
+  exit 1
+fi
+if [ "$nflag" = 1 ]; then
+  # A command run needs NOPASSWD (the probe succeeded) or a ticket keyed to
+  # this parent. The latter is what a real ppid-keyed sudo checks, so an
+  # exec-optimized final sudo (different parent) fails this test.
+  if [ "\${FAKE_SUDO_TICKET:-0}" = 1 ] || ticket; then
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+    if [ "$1" = "--" ]; then shift; fi
+    exec "$@"
+  fi
+  printf 'sudo: a password is required\\n' >&2
+  exit 1
+fi
+printf 'fake sudo: unsupported invocation: %s\\n' "$*" >&2
+exit 1
+`
+
+export async function installFakeSudo({
+  dir,
+  password = '',
+  ticket = false,
+  skipRead = false,
+  noTicket = false,
+  policy = false,
+  failAfterProbe = false,
+} = {}) {
+  const ownsDir = dir === undefined
+  const fakeDir = dir ?? await mkdtemp(join(tmpdir(), 'dsh-fake-sudo-'))
+  const bin = join(fakeDir, 'sudo')
+  const log = join(fakeDir, 'sudo.log')
+  const state = join(fakeDir, 'sudo.state')
+  await writeFile(bin, FAKE_SUDO)
+  await chmod(bin, 0o755)
+  await rm(state, { force: true })
+  await rm(`${state}.count`, { force: true })
+  const previous = {
+    PATH: process.env.PATH,
+    FAKE_SUDO_LOG: process.env.FAKE_SUDO_LOG,
+    FAKE_SUDO_STATE: process.env.FAKE_SUDO_STATE,
+    FAKE_SUDO_PASSWORD: process.env.FAKE_SUDO_PASSWORD,
+    FAKE_SUDO_TICKET: process.env.FAKE_SUDO_TICKET,
+    FAKE_SUDO_SKIP_READ: process.env.FAKE_SUDO_SKIP_READ,
+    FAKE_SUDO_NO_TICKET: process.env.FAKE_SUDO_NO_TICKET,
+    FAKE_SUDO_POLICY: process.env.FAKE_SUDO_POLICY,
+    FAKE_SUDO_FAIL_AFTER_PROBE: process.env.FAKE_SUDO_FAIL_AFTER_PROBE,
+  }
+  process.env.PATH = `${fakeDir}:${process.env.PATH}`
+  process.env.FAKE_SUDO_LOG = log
+  process.env.FAKE_SUDO_STATE = state
+  process.env.FAKE_SUDO_PASSWORD = password
+  process.env.FAKE_SUDO_TICKET = ticket ? '1' : '0'
+  process.env.FAKE_SUDO_SKIP_READ = skipRead ? '1' : '0'
+  process.env.FAKE_SUDO_NO_TICKET = noTicket ? '1' : '0'
+  process.env.FAKE_SUDO_POLICY = policy ? '1' : '0'
+  process.env.FAKE_SUDO_FAIL_AFTER_PROBE = failAfterProbe ? '1' : '0'
+  return {
+    dir: fakeDir,
+    log,
+    state,
+    async readLog() {
+      try {
+        const raw = await readFile(log, 'utf8')
+        return raw.trim().split('\n').filter(Boolean)
+      } catch {
+        return []
+      }
+    },
+    async cleanup() {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+      if (ownsDir) await rm(fakeDir, { recursive: true, force: true })
     },
   }
 }

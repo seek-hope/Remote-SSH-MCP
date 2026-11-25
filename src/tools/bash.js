@@ -18,7 +18,7 @@ export async function remoteJob(target, request, signal) {
 export function makeBashTool(target, cwd = target.root) {
   return defTextTool({
     name: 'bash',
-    description: 'Execute bash on the selected remote host. Each call starts a fresh shell. Commands have the SSH account permissions. Background jobs return a job_id; use job_output/job_kill with the same target. If a launch error includes a job_id, query it before retrying to avoid duplicate execution. Remote Linux requires bash and python3.',
+    description: 'Execute bash on the selected remote host. Each call starts a fresh shell. Commands have the SSH account permissions. Background jobs return a job_id; use job_output/job_kill with the same target. If a launch error includes a job_id, query it before retrying to avoid duplicate execution. A foreground command whose encoded script exceeds 96 KiB in one ssh argument is rejected; use run_in_background or write the script to a file and run it. Remote Linux requires bash and python3.',
     parameters: {
       type: 'object',
       properties: {

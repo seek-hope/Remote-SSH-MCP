@@ -20,8 +20,12 @@ test('glob translate: [!...] negation, depth anchoring, exact end anchor', async
     await writeFile(join(dir, 'b.log'), '')
     await writeFile(join(dir, 'sub', 'c.ts'), '')
     await writeFile(join(dir, 'foo\n'), '') // a trailing newline must not let "foo" match
-    const run = (pattern) => execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '100'], { encoding: 'utf8' })
-      .split('\n').filter(l => l && !l.startsWith('__REMOTE_SSH_TOTAL__')).sort()
+    // Paths are NUL-delimited; the total marker follows the last NUL.
+    const run = (pattern) => {
+      const parts = execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '100'], { encoding: 'utf8' }).split('\0')
+      parts.pop() // total marker
+      return parts.filter(Boolean).sort()
+    }
     assert.deepEqual(run('[!a]*.ts'), [join(dir, 'sub', 'c.ts')]) // a.ts excluded by [!a]
     assert.deepEqual(run('*.ts'), [join(dir, 'a.ts'), join(dir, 'sub', 'c.ts')].sort())
     assert.deepEqual(run('sub/*.ts'), [join(dir, 'sub', 'c.ts')])
@@ -40,13 +44,17 @@ test('glob keeps the newest top-k entries, exact total and stable equal-mtime or
       const time = 1700000000 + Math.floor(i / 3)
       await utimes(file, time, time)
     }
-    const run = cap => execFileSync('python3', ['-c', GLOB_PY, '*.txt', dir, String(cap)], { encoding: 'utf8' }).trimEnd().split('\n')
+    const run = cap => {
+      const parts = execFileSync('python3', ['-c', GLOB_PY, '*.txt', dir, String(cap)], { encoding: 'utf8' }).split('\0')
+      const marker = (parts.pop() ?? '').trim()
+      return { paths: parts.filter(Boolean), marker }
+    }
     const all = run(1000)
     const capped = run(100)
-    assert.equal(capped.pop(), '__REMOTE_SSH_TOTAL__350')
-    assert.equal(all.pop(), '__REMOTE_SSH_TOTAL__350')
-    assert.deepEqual(capped, all.slice(0, 100))
-    assert.ok(capped[0].endsWith('348.txt') || capped[0].endsWith('349.txt'))
+    assert.equal(capped.marker, '__REMOTE_SSH_TOTAL__350')
+    assert.equal(all.marker, '__REMOTE_SSH_TOTAL__350')
+    assert.deepEqual(capped.paths, all.paths.slice(0, 100))
+    assert.ok(capped.paths[0].endsWith('348.txt') || capped.paths[0].endsWith('349.txt'))
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -76,6 +84,22 @@ test('grep groups matches under filenames containing ":" and digits', async () =
     assert.match(remoteCommand(calls.at(-1)), /--null/, 'grep separates filenames with NUL')
     assert.match(out, /dir\/a:1\/b\.txt\n5:hit/, out)
     assert.match(out, /dir\/plain\.txt\n2:hit2/, out)
+  } finally {
+    delete process.env.FAKE_SSH_STDOUT
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+})
+
+test('grep keeps a filename containing a newline as one record', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_STDOUT = 'dir/foo\nbar.txt__NUL__5:hit\n'
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    const out = await makeGrepTool(target, '/remote').execute({ pattern: 'hit' }, exec)
+    assert.match(out, /dir\/foo\nbar\.txt\n5:hit/, out)
+    assert.ok(!out.startsWith('bar.txt\n5:hit'), 'the suffix of a newline filename must not become a file')
+    assert.ok(!out.includes('\n\nbar.txt\n5:hit'), 'no bogus separate group for the filename suffix')
   } finally {
     delete process.env.FAKE_SSH_STDOUT
     delete process.env.FAKE_SSH_MARK

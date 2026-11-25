@@ -10,6 +10,9 @@ import { checkArgs, defTextTool } from '../toolkit.js'
 
 const GLOB_CAP = 100
 const GREP_CAP = 250
+/** Bound the result text so JSON escaping cannot exceed the MCP buffer. */
+const MAX_GREP_BYTES = 512 * 1024
+const MAX_GREP_LINE_CHARS = 8 * 1024
 
 /**
  * Python 3.9-compatible glob walker. Reads pattern and root from argv,
@@ -82,8 +85,15 @@ for dirpath, dirnames, filenames in os.walk(root):
             elif item > results[0]:
                 heapq.heapreplace(results, item)
 for _, _, p in sorted(results, reverse=True):
-    print(p)
-print('__REMOTE_SSH_TOTAL__%d' % total)
+    try:
+        p.encode('utf-8')
+    except UnicodeEncodeError:
+        # A filename that is not valid UTF-8 cannot round-trip through the
+        # text MCP transport; skip it instead of crashing the whole search.
+        continue
+    sys.stdout.buffer.write(os.fsencode(p) + b'\0')
+sys.stdout.buffer.write(('__REMOTE_SSH_TOTAL__%d\n' % total).encode('ascii'))
+sys.stdout.buffer.flush()
 `.trim()
 
 export function makeGlobTool(target, cwd = target.root) {
@@ -110,12 +120,20 @@ export function makeGlobTool(target, cwd = target.root) {
       if (r.timedOut) throw new Error(`glob: search timed out on ${target.name}`)
       if (r.code !== 0) throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
-      const lines = r.stdout.trimEnd().split('\n')
-      const marker = lines.pop() || ''
+      // Paths are NUL-delimited so filenames containing newlines stay intact;
+      // the total marker is the text after the last NUL.
+      const parts = r.stdout.split('\0')
+      const tail = parts.pop() ?? ''
+      const paths = parts.filter(Boolean)
+      const marker = tail.trim().split('\n').filter(Boolean).pop() ?? ''
       if (!marker.startsWith('__REMOTE_SSH_TOTAL__')) throw new Error(`glob: unexpected remote output (no total marker)`)
       const total = parseInt(marker.slice('__REMOTE_SSH_TOTAL__'.length), 10)
-      const paths = lines.filter(Boolean)
-      if (paths.length === 0) return `No files matched "${a.pattern}" under ${root} (remote host ${target.name}).`
+      if (paths.length === 0) {
+        if (Number.isFinite(total) && total > 0) {
+          return `${total} path(s) matched "${a.pattern}" under ${root}, but none of the selected newest names is representable as UTF-8.`
+        }
+        return `No files matched "${a.pattern}" under ${root} (remote host ${target.name}).`
+      }
       const header = Number.isFinite(total) && total > paths.length
         ? `Showing ${paths.length} of ${total} matches (mtime order, capped).`
         : `${paths.length} match${paths.length === 1 ? '' : 'es'}.`
@@ -127,7 +145,7 @@ export function makeGlobTool(target, cwd = target.root) {
 export function makeGrepTool(target, cwd = target.root) {
   return defTextTool({
     name: 'grep',
-    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches. The remote host must run Linux. REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
+    description: `Search file contents with a regular expression (POSIX ERE on the remote grep; ripgrep-only syntax like \\p{...} is unsupported). Returns matching lines with line numbers, grouped by file, capped at ${GREP_CAP} matches and 512 KiB of encoded output; very long lines are shortened. The remote host must run Linux. REMOTE: the search runs on the selected host; binary files and .git/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {
@@ -153,24 +171,63 @@ export function makeGrepTool(target, cwd = target.root) {
       if (r.stdoutTruncated) throw new Error('grep: output exceeded the transport limit; narrow the pattern or path (very long matching lines)')
       const raw = r.stdout
       if (raw.startsWith('__REMOTE_SSH_ERR__:no-such-path')) throw new Error(`grep: no such path on ${target.name}: ${root}`)
-      const lines = raw.split('\n').filter(Boolean)
-      const truncated = lines.length > GREP_CAP
-      const shown = truncated ? lines.slice(0, GREP_CAP) : lines
-      if (shown.length === 0) return `No matches for /${a.pattern}/ under ${root} (remote host ${target.name}).`
+      // GNU grep --null writes `filename\0line:text\n` per match. Parse from
+      // the NUL so a newline inside a filename cannot split the record (and
+      // a suffix of the name is never reported as a separate file).
+      const records = []
+      let rawCount = 0
+      let malformed = 0
+      for (let pos = 0; pos < raw.length;) {
+        const nul = raw.indexOf('\0', pos)
+        if (nul === -1) {
+          malformed += 1
+          break
+        }
+        const newline = raw.indexOf('\n', nul + 1)
+        const end = newline === -1 ? raw.length : newline
+        const file = raw.slice(pos, nul)
+        const body = raw.slice(nul + 1, end)
+        rawCount += 1
+        if (file.includes('\uFFFD')) {
+          // Invalid UTF-8 filename: later tools could not address it.
+          malformed += 1
+        } else if (file || body) {
+          records.push({ file, body })
+        }
+        pos = newline === -1 ? raw.length : newline + 1
+      }
+      // Count raw records (including skipped ones): head passes GREP_CAP+1,
+      // so a malformed sentinel record must still signal truncation.
+      const truncated = rawCount > GREP_CAP
+      const shown = records.slice(0, GREP_CAP)
       // group path:line:text by file, preserving order
       const groups = new Map()
-      for (const line of shown) {
-        // --null puts a NUL between filename and match: a ':' followed by
-        // digits inside a filename can no longer fake the path:line boundary.
-        const nul = line.indexOf('\0')
-        const m = nul === -1 ? null : line.slice(nul + 1).match(/^(\d+):(.*)$/)
-        if (!m) continue
-        const file = line.slice(0, nul)
+      let bytes = 0
+      let cut = false
+      for (const { file, body } of shown) {
+        const m = body.match(/^(\d+):(.*)$/)
+        if (!m) {
+          malformed += 1
+          continue
+        }
+        const text = m[2].length > MAX_GREP_LINE_CHARS ? `${m[2].slice(0, MAX_GREP_LINE_CHARS)}...[line truncated]` : m[2]
+        const record = `${m[1]}:${text}`
+        const cost = Buffer.byteLength(JSON.stringify(file)) + Buffer.byteLength(JSON.stringify(record)) + 4
+        if (bytes + cost > MAX_GREP_BYTES) {
+          cut = true
+          break
+        }
+        bytes += cost
         if (!groups.has(file)) groups.set(file, [])
-        groups.get(file).push(`${m[1]}:${m[2]}`)
+        groups.get(file).push(record)
       }
       const body = [...groups.entries()].map(([f, ls]) => `${f}\n${ls.join('\n')}`).join('\n\n')
-      const note = truncated ? `\n[truncated at ${GREP_CAP} matches; narrow the pattern or path]` : ''
+      const notes = []
+      if (truncated) notes.push(`[truncated at ${GREP_CAP} matches; narrow the pattern or path]`)
+      if (cut) notes.push(`[output truncated at ${Math.round(MAX_GREP_BYTES / 1024)} KiB; narrow the pattern or path]`)
+      if (malformed) notes.push(`[${malformed} record(s) skipped: non-UTF-8/unrepresentable filenames or unparseable output]`)
+      const note = notes.length ? `\n${notes.join('\n')}` : ''
+      if (!body) return `No parseable matches for /${a.pattern}/ under ${root} (remote host ${target.name}).${note}`
       return `${body}${note}`
     },
   })

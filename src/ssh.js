@@ -15,6 +15,7 @@ import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 import { effectiveControlPersist } from './target.js'
+import { clearCachedSudoPassword, sudoCacheKey } from './sudocache.js'
 import { withStoreLock } from './store.js'
 
 const execFileAsync = promisify(execFile)
@@ -29,13 +30,32 @@ const masterWarmers = new Map()
 const recentWarmFailures = new Map()
 const WARM_FAILURE_RETRY_MS = 30_000
 
-// Keep host/key/proxy settings, but do not inherit interactive login commands
-// or rebind forwarded ports on every MCP call. Older clients lack the newer
-// session options (and cannot have those options in their config either).
+// Keep host/key/proxy settings, but do not inherit interactive login commands,
+// forwarding or local commands from the user's config: the service's command
+// channel is not an interactive session. Older clients lack the newer session
+// options (and cannot have those options in their config either).
 const SESSION_ARGS = [
   '-o', 'IgnoreUnknown=RemoteCommand,SessionType,StdinNull,ForkAfterAuthentication',
   '-o', 'RemoteCommand=none', '-o', 'ClearAllForwardings=yes',
+  '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ForwardX11Trusted=no',
+  '-o', 'PermitLocalCommand=no',
 ]
+
+/** Linux caps one argv element at 128 KiB; leave room for ssh's own options. */
+const MAX_REMOTE_ARG_BYTES = 96 * 1024
+/** Keep the first bytes of stderr so a wrapper's start marker survives a flood. */
+const MAX_STDERR_HEAD = 8 * 1024
+const HOST_KEY_RE = /host key verification failed|remote host identification has changed/i
+
+/**
+ * A changed host identity must not keep a sudo password cached for the old
+ * host. Any tool's transport error can expose the change (including
+ * controlPersist=0 targets where the warm-up path never runs).
+ */
+function clearSudoCacheOnHostKeyFailure(opts, stderr) {
+  if (!HOST_KEY_RE.test(stderr)) return
+  clearCachedSudoPassword(sudoCacheKey({ ssh: opts.target, port: opts.port }))
+}
 
 /** Apply the same keepalive policy to key/agent and terminal-created masters. */
 function keepaliveArgs() {
@@ -94,19 +114,96 @@ export async function sshSpawn(opts, command) {
   // Decode inside POSIX sh without consuming the command's stdin payload.
   const encoded = Buffer.from(command, 'utf8').toString('base64')
   const script = `remote_ssh_script=$(printf %s ${encoded} | base64 -d) && eval "$remote_ssh_script"`
+  const remoteArg = `sh -c ${shq(script)}`
+  const remoteArgBytes = Buffer.byteLength(remoteArg)
+  if (remoteArgBytes > MAX_REMOTE_ARG_BYTES) {
+    throw new Error(`remote command is too large for one ssh argument (${remoteArgBytes} bytes encoded, limit ${MAX_REMOTE_ARG_BYTES}); use bash run_in_background, or write the script to a remote file and run it`)
+  }
   return {
     command: 'ssh',
     // `--` ends option parsing so a destination can never be read as an option.
     args: ['-T', ...SESSION_ARGS, ...keepaliveArgs(),
       '-o', 'SessionType=default', '-o', 'StdinNull=no', '-o', 'ForkAfterAuthentication=no',
       '-o', 'ConnectTimeout=20', '-o', 'LogLevel=ERROR', '-o', 'StrictHostKeyChecking=yes', '-o', 'BatchMode=yes',
-      ...ctl, ...portOptionArgs, '--', target, `sh -c ${shq(script)}`],
+      ...ctl, ...portOptionArgs, '--', target, remoteArg],
   }
 }
 
 /** Quote one string for POSIX shell single-quote context. */
 export function shq(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Resolve an SSH destination through `ssh -G` to a stable credential identity
+ * (hostname, user, port). `undefined` means ssh -G is unavailable or the
+ * output is unusable; callers then fall back to the configured alias key.
+ * @param {{ ssh: string, port?: number }} target
+ * @returns {Promise<string|undefined>}
+ */
+export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
+  try {
+    const spec = await sshSpawn({ target: target.ssh, port: target.port, controlPersist: 0 }, 'true')
+    // stdin must be /dev/null: ssh -G does not read it, and a test/alternate
+    // ssh binary that proxies stdin would otherwise block. Detach so a
+    // `Match exec` grandchild can be killed with the process group.
+    const stdout = await new Promise((resolve, reject) => {
+      const child = spawn(spec.command, ['-G', ...spec.args], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      })
+      let out = ''
+      let err = ''
+      let settled = false
+      let timer
+      const killTree = () => {
+        try {
+          if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL')
+          else child.kill('SIGKILL')
+        } catch {
+          try { child.kill('SIGKILL') } catch { /* gone */ }
+        }
+      }
+      const finish = (fn, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        // Drop listeners/streams so a Match exec child that outlives the
+        // timeout cannot keep appending to an abandoned buffer.
+        child.stdout?.removeAllListeners()
+        child.stderr?.removeAllListeners()
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+        fn(value)
+      }
+      timer = setTimeout(() => {
+        killTree()
+        finish(reject, new Error('ssh -G timed out'))
+      }, Math.max(1, Math.min(timeoutMs, 5000)))
+      child.stdout.on('data', (chunk) => {
+        if (settled) return
+        out += chunk.toString('utf8')
+        if (out.length > 512 * 1024) {
+          killTree()
+          finish(reject, new Error('ssh -G output too large'))
+        }
+      })
+      child.stderr.on('data', (chunk) => {
+        if (settled) return
+        err = (err + chunk.toString('utf8')).slice(-4096)
+      })
+      child.on('error', (error) => finish(reject, error))
+      child.on('close', (code) => {
+        finish(code === 0 ? resolve : reject, code === 0 ? out : new Error(err.trim() || `ssh -G exited ${code}`))
+      })
+    })
+    const pick = (name) => (stdout.match(new RegExp(`^${name} (.+)$`, 'm'))?.[1] ?? '').trim()
+    const hostname = pick('hostname')
+    if (!hostname) return undefined
+    return `${hostname}\u0000${pick('user')}\u0000${pick('port')}`
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -147,12 +244,14 @@ export function keepTail(chunks, byteCount, chunk, cap) {
  * - `onClose` receives the collected streams and a `settle` handle
  *   (`resolve`/`reject`) so each caller maps the transport result its own way.
  */
-function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, onTimeout, onClose }) {
+function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin, onTimeout, onClose }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('aborted'))
     const child = spawn(spec.command, spec.args, { stdio: ['pipe', 'pipe', 'pipe'] })
     const outChunks = []
     const errChunks = []
+    const errHeadChunks = []
+    let errHeadBytes = 0
     let outBytes = 0
     let errBytes = 0
     let outTotal = 0
@@ -187,18 +286,26 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, onT
       outBytes = keepTail(outChunks, outBytes, d, maxStdout)
     })
     child.stderr.on('data', (d) => {
+      if (errHeadBytes < MAX_STDERR_HEAD) {
+        const take = Math.min(d.length, MAX_STDERR_HEAD - errHeadBytes)
+        errHeadChunks.push(d.subarray(0, take))
+        errHeadBytes += take
+      }
       errTotal += d.length
       errBytes = keepTail(errChunks, errBytes, d, maxStderr)
     })
     child.on('error', (e) => finish(reject, new Error(`ssh spawn failed: ${e.message}`)))
     child.on('close', (transportCode) => {
       onClose({
-        transportCode, timedOut, outChunks, errChunks, outTotal, errTotal, outBytes, errBytes,
+        transportCode, timedOut, outChunks, errChunks, errHeadChunks, outTotal, errTotal, outBytes, errBytes,
         settle: { resolve: (v) => finish(resolve, v), reject: (e) => finish(reject, e) },
       })
     })
     if (stdin !== undefined) {
       child.stdin.on('error', () => {}) // remote closed early; close event reports it
+      // Wipe a caller-owned secret as soon as the bytes are handed to the OS,
+      // instead of keeping it for the whole remote command lifetime.
+      if (wipeStdin && Buffer.isBuffer(stdin)) child.stdin.once('finish', () => stdin.fill(0))
       child.stdin.end(stdin)
     } else {
       child.stdin.end()
@@ -232,13 +339,15 @@ export async function sshExec(opts) {
     timeoutMs = 120_000,
     maxStdout = 8 * 1024 * 1024,
     maxStderr = 64 * 1024,
+    wipeStdin = false,
   } = opts
   const spec = await sshSpawn(opts, command)
   return runSshChild(spec, {
-    stdin, signal, timeoutMs, maxStdout, maxStderr,
+    stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin,
     onTimeout: () => new Error(`ssh timeout after ${timeoutMs}ms: ${command.slice(0, 120)}`),
     onClose: ({ transportCode, outChunks, errChunks, outTotal, settle }) => {
       const stderr = Buffer.concat(errChunks).toString('utf8')
+      clearSudoCacheOnHostKeyFailure(opts, stderr)
       if (transportCode !== 0) {
         const tail = stderr.trim().split('\n').slice(-5).join('\n')
         return settle.reject(new Error(`remote command failed (exit ${transportCode}): ${tail || '(no stderr)'}`))
@@ -266,7 +375,15 @@ export async function sshExec(opts) {
  * @returns {Promise<{ code: number|null, stdout: string, stderr: string, timedOut?: boolean }>}
  */
 export async function sshRun(opts) {
-  const { command, stdin, signal, timeoutMs = 120_000, maxStdout = 4 * 1024 * 1024, maxStderr = 64 * 1024 } = opts
+  const {
+    command,
+    stdin,
+    signal,
+    timeoutMs = 120_000,
+    maxStdout = 4 * 1024 * 1024,
+    maxStderr = 64 * 1024,
+    wipeStdin = false,
+  } = opts
   const MARK = `__REMOTE_SSH_EXIT_${randomUUID()}__`
   // Subshell, not brace group: an `exit` inside the command must not kill the
   // wrapper before the marker is printed. The marker is random per call, so
@@ -276,13 +393,15 @@ export async function sshRun(opts) {
   // No onTimeout: a local timeout only kills the child and lets `close`
   // resolve with timedOut:true (sshRun reports timeouts as data).
   return runSshChild(spec, {
-    stdin, signal, timeoutMs, maxStdout, maxStderr,
-    onClose: ({ transportCode, timedOut, outChunks, errChunks, outTotal, errTotal, settle }) => {
+    stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin,
+    onClose: ({ transportCode, timedOut, outChunks, errChunks, errHeadChunks, outTotal, errTotal, settle }) => {
       let stdout = Buffer.concat(outChunks).toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
+      const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
+      clearSudoCacheOnHostKeyFailure(opts, stderr)
       const truncated = { stdoutTruncated: outTotal > maxStdout, stderrTruncated: errTotal > maxStderr }
       if (timedOut) {
-        return settle.resolve({ code: null, stdout, stderr, timedOut: true, ...truncated })
+        return settle.resolve({ code: null, stdout, stderr, stderrHead, timedOut: true, ...truncated })
       }
       if (transportCode !== 0) {
         return settle.reject(new Error(`ssh transport failed (exit ${transportCode}): ${stderr.trim().split('\n').slice(-3).join('\n')}`))
@@ -293,7 +412,7 @@ export async function sshRun(opts) {
       }
       const code = parseInt(stdout.slice(idx + MARK.length).trim(), 10)
       stdout = stdout.slice(0, idx).replace(/\n$/, '')
-      settle.resolve({ code: Number.isFinite(code) ? code : null, stdout, stderr, ...truncated })
+      settle.resolve({ code: Number.isFinite(code) ? code : null, stdout, stderr, stderrHead, ...truncated })
     },
   })
 }
@@ -385,6 +504,13 @@ export async function ensureControlMaster(target, options = {}) {
   const interactive = options.interactive !== false
   const signal = options.signal
   if (signal?.aborted) return { ok: false, mode: 'aborted', error: 'aborted' }
+
+  // ControlMaster sockets are not wired up on Windows; probing one on every
+  // call would only add a failing `ssh -O check` round trip. Tool calls still
+  // work with key/agent authentication (ControlMaster=no).
+  if (process.platform === 'win32') {
+    return { ok: true, mode: 'disabled', detail: 'ControlMaster is not supported on Windows; each call uses key/agent authentication' }
+  }
 
   if (effectiveControlPersist(target) <= 0) return { ok: true, mode: 'disabled', detail: 'ControlPersist is disabled' }
 
@@ -488,6 +614,11 @@ async function establishControlMaster(target, { interactive }) {
   // Only an authentication-shaped failure is worth a terminal: popping a
   // window for a dead host or a bad ssh alias would be noise.
   const authHint = /permission denied|publickey|password|passphrase|authentication|no supported authentication|host key verification failed/i
+  // A changed host identity must not keep a sudo password cached for the old
+  // host; the user has to accept the key first and then re-enter the password.
+  if (/host key verification failed|remote host identification has changed/i.test(headlessError)) {
+    clearCachedSudoPassword(sudoCacheKey(target))
+  }
   if (!interactive || !authHint.test(headlessError)) {
     return {
       ok: false,
@@ -627,8 +758,6 @@ const LINUX_TERMINALS = [
  * @returns {Promise<{ok: true, terminal: string} | {ok: false, error: string}>}
  */
 export async function runInTerminal(command) {
-  await ensureControlDir()
-
   const override = process.env.REMOTE_SSH_TERMINAL
   if (override !== undefined && override.trim() !== '') {
     let parts
@@ -687,5 +816,9 @@ export async function openConnectTerminal(target) {
   if (command === undefined) {
     return { ok: false, error: `ControlPersist is disabled for "${target.name}" (set controlPersist > 0 first)` }
   }
+  // Only the connect command needs the ControlMaster socket directory; the
+  // sudo password prompt uses its own private socket and must not fail just
+  // because the control directory is unavailable.
+  await ensureControlDir()
   return runInTerminal(command)
 }

@@ -2,6 +2,7 @@ import * as z from 'zod/v4'
 import { parseTargets, targetFields, effectiveControlPersist } from './target.js'
 import { readTargetStoreStrict, saveTargetStore, withStoreLock } from './store.js'
 import { ensureControlMaster, sshControl, sshExec, shq } from './ssh.js'
+import { clearCachedSudoPassword, sudoCacheKey } from './sudocache.js'
 
 export const manageSchema = z.strictObject({
   action: z.enum(['list', 'add', 'update', 'remove', 'connect', 'disconnect', 'status']),
@@ -21,7 +22,10 @@ export async function findTarget(storeFile, name) {
 export async function readyTarget(target, signal) {
   signal?.throwIfAborted()
   const result = await ensureControlMaster(target, { interactive: true, signal })
-  if (!result.ok) throw new Error(result.error + ' Configure REMOTE_SSH_TERMINAL if a terminal cannot be opened.')
+  if (!result.ok) {
+    if (result.mode === 'aborted' || signal?.aborted) throw new Error('aborted')
+    throw new Error(result.error + ' Configure REMOTE_SSH_TERMINAL if a terminal cannot be opened.')
+  }
   signal?.throwIfAborted()
   return result
 }
@@ -30,7 +34,16 @@ async function verifyTarget(target, create, signal) {
   await readyTarget(target, signal)
   const command = create ? `mkdir -p -- ${shq(target.root)}` : `test -d ${shq(target.root)}`
   await sshExec({ target: target.ssh, port: target.port, controlPersist: target.controlPersist, command, signal, timeoutMs: 30_000 })
-    .catch(error => { throw new Error(`Cannot access remote root ${target.root}: ${error.message}. Use create: true to create it.`) })
+    .catch(error => {
+      // An abort or a transport failure is not a missing root directory.
+      if (signal?.aborted) throw error
+      if (/\(exit 1\)/.test(error.message)) {
+        throw new Error(create
+          ? `Cannot create remote root ${target.root}: ${error.message}`
+          : `Cannot access remote root ${target.root}: ${error.message}. Use create: true to create it.`)
+      }
+      throw new Error(`Cannot verify remote root ${target.root}: ${error.message}`)
+    })
 }
 
 export async function manageTargets(input, storeFile, signal) {
@@ -44,9 +57,15 @@ export async function manageTargets(input, storeFile, signal) {
       if (ready.mode === 'disabled') await verifyTarget(target, false, signal)
       return { target: target.name, connected: true, mode: ready.mode }
     }
-    if (effectiveControlPersist(target) === 0) return { target: target.name, connected: false, detail: 'ControlPersist is disabled; each call uses key/agent authentication.' }
+    if (effectiveControlPersist(target) === 0) {
+      if (args.action === 'disconnect') clearCachedSudoPassword(sudoCacheKey(target))
+      return { target: target.name, connected: false, detail: 'ControlPersist is disabled; each call uses key/agent authentication.' }
+    }
     signal?.throwIfAborted()
     const result = await sshControl(target, args.action === 'status' ? 'check' : 'exit')
+    // Disconnecting is an explicit session teardown: drop this destination's
+    // cached sudo password even if closing the master reports an error.
+    if (args.action === 'disconnect') clearCachedSudoPassword(sudoCacheKey(target))
     if (args.action === 'disconnect' && result.code !== 0 && !/No such file|Connection refused/i.test(result.stderr)) throw new Error(result.stderr || 'Failed to disconnect.')
     return { target: target.name, connected: args.action === 'status' && result.code === 0, detail: (result.stderr || result.stdout).trim() }
   }
@@ -57,7 +76,10 @@ export async function manageTargets(input, storeFile, signal) {
     if (args.action === 'update' && !before) throw new Error(`No target named "${args.target}".`)
     const fields = Object.fromEntries(Object.keys(targetFields).filter(key => args[key] !== undefined).map(key => [key, args[key]]))
     const entry = { ...before, ...fields }
-    if (args.port === null || (args.ssh !== undefined && args.port === undefined)) delete entry.port
+    // Keep the stored port when update merely restates the same ssh string;
+    // an inline "host:port" or an explicit port: null still replaces/clears it.
+    const sshChanged = args.ssh !== undefined && args.ssh !== before?.ssh
+    if (args.port === null || (sshChanged && args.port === undefined)) delete entry.port
     prepared = parseTargets([entry])[0]
     parseTargets([...snapshot.filter(t => args.action === 'add' || t.name !== args.target), prepared])
     // Network and user interaction must not hold the shared configuration lock.
@@ -68,18 +90,24 @@ export async function manageTargets(input, storeFile, signal) {
     const targets = await readTargetStoreStrict(storeFile)
     const index = targets.findIndex(t => t.name === args.target)
     if (args.action !== 'add' && index === -1) throw new Error(`No target named "${args.target}".`)
+    let droppedCredential
     if (args.action === 'remove') {
+      droppedCredential = targets[index]
       targets.splice(index, 1)
     } else {
       if (before && Object.keys(targetFields).some(key => targets[index][key] !== before[key])) {
         throw new Error(`Target "${args.target}" changed during verification; re-read its settings and retry.`)
       }
+      // The credential belongs to the destination, not the target name: only
+      // an ssh/port change makes the old entry unaddressable.
+      if (args.action === 'update' && sudoCacheKey(before) !== sudoCacheKey(prepared)) droppedCredential = before
       if (args.action === 'add') targets.push(prepared)
       else targets[index] = prepared
       parseTargets(targets) // Recheck concurrent adds/renames before saving.
     }
     signal?.throwIfAborted()
     await saveTargetStore(storeFile, targets)
+    if (droppedCredential) clearCachedSudoPassword(sudoCacheKey(droppedCredential))
     return { action: args.action, targets, storeFile }
-  })
+  }, { signal })
 }

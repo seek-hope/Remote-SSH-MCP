@@ -6,12 +6,41 @@
  * keep a single import site.
  */
 
-import { readFile, writeFile, rename, rm, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, rename, rm, mkdir, readdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { parseTargets } from './target.js'
 
 export { withStoreLock, _lockTestHooks } from './lock.js'
+
+const TMP_PREFIX = '.remote-ssh-targets.'
+const TMP_SUFFIX = '.tmp'
+/** A tmp file this old can only be a leftover from a killed writer. */
+const STALE_TMP_MS = 5 * 60 * 1000
+
+/**
+ * Remove tmp files left by a hard crash between write and rename. Saves are
+ * atomic, but a SIGKILL/power loss skips the error cleanup; without a sweep
+ * those files accumulate forever. Best effort: never fails a save.
+ */
+async function sweepStaleTmp(dir) {
+  let names
+  try {
+    names = await readdir(dir)
+  } catch {
+    return
+  }
+  const now = Date.now()
+  await Promise.all(names
+    .filter((name) => name.startsWith(TMP_PREFIX) && name.endsWith(TMP_SUFFIX))
+    .map(async (name) => {
+      const full = join(dir, name)
+      try {
+        const { mtimeMs } = await stat(full)
+        if (Math.abs(now - mtimeMs) > STALE_TMP_MS) await rm(full, { force: true })
+      } catch { /* raced away or unreadable */ }
+    }))
+}
 
 /**
  * Persist the target list atomically (tmp + rename).
@@ -19,10 +48,12 @@ export { withStoreLock, _lockTestHooks } from './lock.js'
  * @param {import('./target.js').RemoteTarget[]} targets
  */
 export async function saveTargetStore(file, targets) {
-  await mkdir(dirname(file), { recursive: true })
+  const dir = dirname(file)
+  await mkdir(dir, { recursive: true })
+  await sweepStaleTmp(dir)
   // Unique per call (pid alone would collide across concurrent writers in one
   // process); removed on failure so a crash never leaves a stale tmp behind.
-  const tmp = join(dirname(file), `.remote-ssh-targets.${process.pid}.${randomUUID()}.tmp`)
+  const tmp = join(dir, `${TMP_PREFIX}${process.pid}.${randomUUID()}${TMP_SUFFIX}`)
   // JSON.stringify omits optional fields whose value is undefined.
   const body = targets.map((t) => ({ ...t, name: t.name, ssh: t.ssh, root: t.root }))
   try {
@@ -54,7 +85,10 @@ export async function readTargetStoreStrict(file) {
   }
   let json
   try {
-    json = JSON.parse(raw)
+    // Strip a UTF-8 BOM: editors add one, JSON.parse rejects it, and the store
+    // is documented as hand-editable.
+    const body = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw
+    json = JSON.parse(body)
   } catch (e) {
     throw new Error(`target store ${file} is not valid JSON (${e.message}); refusing to modify it — fix or remove the file first`)
   }

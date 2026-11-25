@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { sshRun } from '../src/ssh.js'
+import { sshRun, sshSpawn } from '../src/ssh.js'
+import { setCachedSudoPassword, sudoCacheKey, sudoCacheSize } from '../src/sudocache.js'
 import { installFakeSsh } from './helpers.mjs'
 
 const MiB = 1024 * 1024
@@ -58,6 +59,44 @@ test('sshRun caps stderr memory', async () => {
   } finally {
     delete process.env.FAKE_SSH_MARK
     delete process.env.FAKE_SSH_BIG_ERR
+    await fake.cleanup()
+  }
+})
+
+test('sshRun wipes a caller-provided stdin buffer when asked', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_MARK = '0'
+  const secret = Buffer.from('secret')
+  try {
+    const result = await sshRun({ target: 'h', command: 'true', stdin: secret, wipeStdin: true, timeoutMs: 5000 })
+    assert.equal(result.code, 0)
+  } finally {
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+  assert.equal(secret.every((byte) => byte === 0), true, 'the wire copy is wiped after stdin is accepted')
+})
+
+test('a command over the single-argument limit is rejected before spawning ssh', async () => {
+  await assert.rejects(
+    sshSpawn({ target: 'h', controlPersist: 0 }, 'x'.repeat(120_000)),
+    /too large for one ssh argument/,
+  )
+  const spec = await sshSpawn({ target: 'h', controlPersist: 0 }, 'x'.repeat(60_000))
+  assert.ok(Buffer.byteLength(spec.args.at(-1)) <= 96 * 1024)
+})
+
+test('a host-key failure clears the destination sudo cache', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_EXIT = '255'
+  process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
+  setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+  try {
+    await assert.rejects(sshRun({ target: 'h', command: 'true', timeoutMs: 5000 }), /ssh transport failed/)
+    assert.equal(sudoCacheSize(), 0)
+  } finally {
+    delete process.env.FAKE_SSH_EXIT
+    delete process.env.FAKE_SSH_STDERR
     await fake.cleanup()
   }
 })

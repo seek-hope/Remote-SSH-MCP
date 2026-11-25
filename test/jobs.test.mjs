@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -94,6 +94,32 @@ test('a shell exiting before its background child does not permit premature clea
   await until(async () => !await alive(child))
 }))
 
+test('a worker killed after its child starts leaves a lost job and refuses cleanup', linux, async () => fixture(async ({ invoke, start }) => {
+  const { worker, child } = await start()
+  process.kill(worker.pid, 'SIGKILL')
+  await until(async () => (await invoke({ action: 'output' })).status === 'lost')
+  const result = await invoke({ action: 'output' })
+  assert.equal(result.status, 'lost')
+  assert.equal(result.worker_missing, true)
+  assert.match(result.warning, /descendants may still be running/)
+  await assert.rejects(invoke({ action: 'output', cleanup: true }), /lost job/)
+  assert.equal(await alive(child), true, 'the surviving child is not silently forgotten')
+}))
+
+test('a worker killed after a kill request is lost and cannot be cleaned up', linux, async () => fixture(async ({ invoke, start, job_id, env }) => {
+  const { worker, child } = await start()
+  // job_kill writes this marker before signalling; the worker then dies
+  // without proving its members stopped.
+  await writeFile(join(env.REMOTE_SSH_JOB_DIR, job_id, 'killed'), '')
+  process.kill(worker.pid, 'SIGKILL')
+  await until(async () => (await invoke({ action: 'output' })).status === 'lost')
+  const result = await invoke({ action: 'output' })
+  assert.equal(result.status, 'lost')
+  assert.equal(result.worker_missing, true)
+  await assert.rejects(invoke({ action: 'output', cleanup: true }), /lost job/)
+  assert.equal(await alive(child), true, 'the surviving child is not silently forgotten')
+}))
+
 test('TERM/KILL escalation survives losing the job_kill request process', linux, async () => fixture(async ({ job_id, env, start, term }) => {
   const { worker, child } = await start()
   const request = spawn('python3', [script], { env, stdio: ['pipe', 'ignore', 'ignore'] })
@@ -109,3 +135,104 @@ test('TERM/KILL escalation survives losing the job_kill request process', linux,
     await closed
   }
 }))
+
+test('job output keeps a UTF-8 character split at a page boundary', linux, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-utf8-'))
+  const env = { ...process.env, REMOTE_SSH_JOB_DIR: join(dir, 'jobs') }
+  const job_id = randomUUID()
+  const job = join(env.REMOTE_SSH_JOB_DIR, job_id)
+  const call = async request => {
+    const proc = exec('python3', [script], { env, timeout: 10000 })
+    proc.child.stdin.end(JSON.stringify(request))
+    return JSON.parse((await proc).stdout)
+  }
+  try {
+    await mkdir(job, { recursive: true })
+    const prefix = 'a'.repeat(65535)
+    await writeFile(join(job, 'out'), prefix + '中' + 'tail')
+    await writeFile(join(job, 'state.json'), JSON.stringify({ pid: 999999, stamp: '0', version: 3 }))
+    await writeFile(join(job, 'exit'), '0')
+    await writeFile(join(job, 'done'), '')
+    const first = await call({ action: 'output', job_id, limit: 65536 })
+    assert.equal(first.output, prefix)
+    assert.equal(first.next_offset, 65535)
+    assert.equal(first.has_more, true)
+    const second = await call({ action: 'output', job_id, offset: first.next_offset, limit: 65536 })
+    assert.ok(second.output.startsWith('中'))
+    assert.equal(second.next_offset, 65535 + 3 + 4)
+    assert.equal(second.has_more, false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a background command larger than the argv limit runs from a script file', linux, async () => fixture(async ({ dir, invoke, job_id }) => {
+  const command = '#'.repeat(140_000) + '\nprintf ok'
+  assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command })).status, 'started')
+  let result
+  for (let i = 0; i < 200; i++) {
+    result = await invoke({ action: 'output', job_id, limit: 100 })
+    if (result.status !== 'running') break
+    await delay(25)
+  }
+  assert.equal(result.status, 'completed')
+  assert.equal(result.exit_code, 0)
+  assert.match(result.output, /ok/)
+}))
+
+test('job output preserves a UTF-8 character split at a running job current EOF', linux, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-utf8-live-'))
+  const env = { ...process.env, REMOTE_SSH_JOB_DIR: join(dir, 'jobs') }
+  const job_id = randomUUID()
+  const job = join(env.REMOTE_SSH_JOB_DIR, job_id)
+  const raw = await readFile('/proc/self/stat', 'utf8')
+  const stamp = raw.slice(raw.lastIndexOf(')') + 2).split(' ')[19]
+  const call = async request => {
+    const proc = exec('python3', [script], { env, timeout: 10000 })
+    proc.child.stdin.end(JSON.stringify(request))
+    return JSON.parse((await proc).stdout)
+  }
+  try {
+    await mkdir(job, { recursive: true })
+    const prefix = 'a'.repeat(65534)
+    await writeFile(join(job, 'out'), Buffer.concat([Buffer.from(prefix), Buffer.from([0xe4])]))
+    await writeFile(join(job, 'state.json'), JSON.stringify({ pid: process.pid, stamp, version: 3 }))
+    const first = await call({ action: 'output', job_id, limit: 65536 })
+    assert.equal(first.status, 'running')
+    assert.equal(first.output, prefix)
+    assert.equal(first.next_offset, 65534)
+    assert.equal(first.has_more, true)
+    await writeFile(join(job, 'out'), Buffer.concat([Buffer.from(prefix), Buffer.from('中tail')]))
+    const second = await call({ action: 'output', job_id, offset: first.next_offset, limit: 65536 })
+    assert.ok(second.output.startsWith('中tail'))
+    assert.equal(second.next_offset, 65534 + 3 + 4)
+    assert.equal(second.has_more, false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a v2 job with an exit file stays completed and cleanable', linux, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-v2-'))
+  const env = { ...process.env, REMOTE_SSH_JOB_DIR: join(dir, 'jobs') }
+  const job_id = randomUUID()
+  const job = join(env.REMOTE_SSH_JOB_DIR, job_id)
+  const call = async request => {
+    const proc = exec('python3', [script], { env, timeout: 10000 })
+    proc.child.stdin.end(JSON.stringify(request))
+    return JSON.parse((await proc).stdout)
+  }
+  try {
+    await mkdir(job, { recursive: true })
+    await writeFile(join(job, 'out'), 'old')
+    await writeFile(join(job, 'state.json'), JSON.stringify({ pid: 999999, stamp: '0', version: 2 }))
+    await writeFile(join(job, 'exit'), '0')
+    const out = await call({ action: 'output', job_id })
+    assert.equal(out.status, 'completed')
+    assert.equal(out.worker_missing, undefined)
+    const cleaned = await call({ action: 'output', job_id, cleanup: true })
+    assert.equal(cleaned.cleaned_up, true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

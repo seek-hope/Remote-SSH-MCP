@@ -69,7 +69,7 @@ echo "########## refuted counter-designs ##########"
 expect_violation LockHuskRace LockHuskRace MutualExclusion
 expect_violation Warmup WarmupNoDedup NoConcurrentTerminals
 expect_violation Jobs JobsUnsafe NoUnreadOutputLost
-expect_violation Sudo SudoViaMcp Secrecy
+expect_violation Sudo SudoLeak ObservableSecrecy
 
 if [[ $status -eq 0 ]]; then
   echo "OK: all models match their documented outcome."

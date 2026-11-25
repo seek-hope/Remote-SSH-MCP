@@ -7,6 +7,11 @@ import { checkArgs, defTextTool } from '../toolkit.js'
 
 const FILE_SCRIPT = readFileSync(new URL('../files.py', import.meta.url), 'utf8')
 const MAX_READ_LINES = 2000
+// The MCP stdio transport caps one message at 10 MiB; leave room for the
+// JSON-RPC envelope and escape expansion.
+const MAX_REQUEST_BYTES = 8 * 1024 * 1024
+
+const jsonBytes = (value) => Buffer.byteLength(JSON.stringify(value))
 
 async function remoteFile(target, action, path, args, stdin, signal) {
   const output = await sshExec({
@@ -43,10 +48,12 @@ function renderNumbered(path, result, offset) {
   const numbered = lines.map((line, i) => `${offset + i}\t${line}`).join('\n')
   const end = offset + count - 1
   const footer = count === 0
-    ? (total > 0 ? `(Offset ${offset} is past end of file - total ${total} lines)` : '(File is empty)')
-    : end >= total
+    ? (total === null ? `(No lines at offset ${offset})` : total > 0 ? `(Offset ${offset} is past end of file - total ${total} lines)` : '(File is empty)')
+    : total !== null && end >= total
       ? `(End of file - total ${total} lines)`
-      : `(Showing lines ${offset}-${end} of ${total}. Use offset=${next} to continue.)`
+      : total === null
+        ? `(Showing lines ${offset}-${end}. Use offset=${next} to continue.)`
+        : `(Showing lines ${offset}-${end} of ${total}. Use offset=${next} to continue.)`
   const note = capped ? '\n[truncated at the 1 MiB read limit; only complete lines are shown]' : ''
   return `<path>${path}</path>\n<content>\n${numbered}\n</content>\n${footer}${note}`
 }
@@ -54,7 +61,7 @@ function renderNumbered(path, result, offset) {
 export function makeReadTool(target, cwd = target.root) {
   return defTextTool({
     name: 'read',
-    description: 'Read a UTF-8 text file with accurate line numbers. Returns at most 2000 complete lines and 1 MiB, with a continuation offset when capped. A single line exceeding 1 MiB is rejected. REMOTE: the path lives on the selected Linux host.',
+    description: 'Read a UTF-8 text file with accurate line numbers. Returns at most 2000 complete lines and 1 MiB, with a continuation offset when capped. A single line exceeding 1 MiB is rejected when it is the first line of the window; otherwise the window stops before it. Files larger than 8 MiB return the requested window and an exact total only when the scan reaches EOF. REMOTE: the path lives on the selected Linux host.',
     parameters: {
       type: 'object',
       properties: {
@@ -79,7 +86,7 @@ export function makeReadTool(target, cwd = target.root) {
 export function makeWriteTool(target, cwd = target.root) {
   return defTextTool({
     name: 'write',
-    description: 'Create or fully replace a UTF-8 text file. Upload byte count and SHA-256 are verified before atomic replacement; new files use mode 0600 and existing permission bits are preserved. REMOTE: parent directories are created on the selected Linux host.',
+    description: 'Create or fully replace a UTF-8 text file. Upload byte count and SHA-256 are verified before atomic replacement; new files use mode 0600 and existing permission bits are preserved. A symlink target is written through and the link is preserved; a non-regular target is refused. Content is capped at 8 MiB of JSON-encoded request. REMOTE: parent directories are created on the selected Linux host.',
     parameters: {
       type: 'object',
       properties: {
@@ -91,6 +98,10 @@ export function makeWriteTool(target, cwd = target.root) {
     async execute(args, exec) {
       const a = checkArgs('write', args, { file_path: 'string', content: 'string' })
       if (hasBinaryContent(a.content)) throw new Error('write: content must be UTF-8 text (NUL bytes or truncated characters are not allowed)')
+      const wire = jsonBytes(a.content)
+      if (wire > MAX_REQUEST_BYTES) {
+        throw new Error(`write: content is too large for one MCP request (${wire} bytes JSON-encoded, limit ${MAX_REQUEST_BYTES}); split the file or write it with bash`)
+      }
       const path = resolveRemote(a.file_path, cwd)
       const buf = Buffer.from(a.content, 'utf8')
       const digest = createHash('sha256').update(buf).digest('hex')
@@ -105,7 +116,7 @@ export function makeWriteTool(target, cwd = target.root) {
 export function makeEditTool(target, cwd = target.root) {
   return defTextTool({
     name: 'edit',
-    description: 'Replace literal text in an existing remote UTF-8 file. Read the file first. Matching, replacement and atomic write run in one SSH call; only edit parameters are uploaded. Input and result are capped at 4 MiB. An inode/mtime/ctime/size check detects some concurrent changes but is not a lock; on conflict, re-read and reconcile.',
+    description: 'Replace literal text in an existing remote UTF-8 file. Read the file first. Matching, replacement and atomic write run in one SSH call; only edit parameters are uploaded. The file and result are capped at 4 MiB, and old_string plus new_string must fit in an 8 MiB JSON request. Symlinks are followed. An inode/mtime/ctime/size check detects some concurrent changes but is not a lock; on conflict, re-read and reconcile.',
     parameters: {
       type: 'object',
       properties: {
@@ -121,6 +132,10 @@ export function makeEditTool(target, cwd = target.root) {
       if (a.old_string.length === 0) throw new Error('edit: old_string must be a non-empty string')
       if (hasBinaryContent(a.old_string)) throw new Error('edit: old_string must be UTF-8 text (NUL bytes or truncated characters are not allowed)')
       if (hasBinaryContent(a.new_string)) throw new Error('edit: new_string must be UTF-8 text (NUL bytes or truncated characters are not allowed)')
+      const wire = jsonBytes(a.old_string) + jsonBytes(a.new_string)
+      if (wire > MAX_REQUEST_BYTES) {
+        throw new Error(`edit: old_string plus new_string exceed the 8 MiB MCP request budget (${wire} bytes JSON-encoded)`)
+      }
       const path = resolveRemote(a.file_path, cwd)
       const { replaced } = await remoteFile(target, 'edit', path, [], JSON.stringify({
         old_string: a.old_string, new_string: a.new_string, replace_all: a.replace_all === true,

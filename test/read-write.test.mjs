@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmod, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { chmod, readFile, readdir, stat, writeFile, symlink, lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { makeReadTool, makeWriteTool, makeEditTool } from '../src/tools/files.js'
 import { installLocalSsh, installFakeSsh } from './helpers.mjs'
@@ -35,7 +35,7 @@ test('read validates the requested UTF-8 window instead of silently replacing in
     await writeFile(file, content)
     await assert.rejects(read.execute({ file_path: file }, {}), /UTF-8/)
   }
-  await assert.rejects(read.execute({ file_path: dir }, {}), /directory/)
+  await assert.rejects(read.execute({ file_path: dir }, {}), /not a regular file/)
   await assert.rejects(read.execute({ file_path: join(dir, 'absent') }, {}), /No such file/)
 }))
 
@@ -125,4 +125,29 @@ test('edit runs in one SSH call and rejects missing, ambiguous and oversized rep
   await writeFile(file, 'x'.repeat(4 * MiB))
   await assert.rejects(edit.execute({ file_path: file, old_string: 'x', new_string: 'xx', replace_all: true }, {}), /edited result exceeds/)
   assert.equal((await stat(file)).size, 4 * MiB)
+}))
+
+test('read stops scanning large files after the window but totals exactly at EOF', async () => fixture(async ({ dir, read }) => {
+  const file = join(dir, 'huge')
+  const line = 'L'.repeat(99) + '\n'
+  const count = Math.ceil((9 * MiB) / 100)
+  await writeFile(file, line.repeat(count))
+  const first = await read.execute({ file_path: file, limit: 2 }, {})
+  assert.match(first, /Showing lines 1-2\. Use offset=3 to continue\./)
+  assert.doesNotMatch(first, /of \d+\. Use offset/)
+  const tail = await read.execute({ file_path: file, offset: count - 1, limit: 5 }, {})
+  assert.match(tail, new RegExp(`End of file - total ${count} lines`))
+}))
+
+test('read rejects a FIFO without blocking and writes follow symlinks', async () => fixture(async ({ dir, read, write }) => {
+  const fifo = join(dir, 'pipe')
+  spawnSync('mkfifo', [fifo])
+  await assert.rejects(read.execute({ file_path: fifo }, {}), /not a regular file/)
+  const target = join(dir, 'target')
+  await writeFile(target, 'old')
+  const link = join(dir, 'link')
+  await symlink(target, link)
+  await write.execute({ file_path: link, content: 'new' }, {})
+  assert.equal(await readFile(target, 'utf8'), 'new')
+  assert.equal((await lstat(link)).isSymbolicLink(), true)
 }))

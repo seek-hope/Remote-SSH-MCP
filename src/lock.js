@@ -71,6 +71,7 @@ function lockOpts(opts = {}) {
     timeoutMs: opts.timeoutMs ?? numEnv('REMOTE_SSH_LOCK_TIMEOUT_MS', 150_000),
     graceMs: opts.graceMs ?? numEnv('REMOTE_SSH_LOCK_GRACE_MS', 5_000),
     retryMs: opts.retryMs ?? numEnv('REMOTE_SSH_LOCK_RETRY_MS', 50),
+    signal: opts.signal,
   }
 }
 
@@ -106,7 +107,9 @@ async function cleanStaleStaging(path, graceMs) {
     const full = join(dir, name)
     try {
       const { mtimeMs } = await stat(full)
-      if (now - mtimeMs > graceMs) await rm(full, { recursive: true, force: true }).catch(() => {})
+      // A staging dir from a clock step back is still an orphan; do not let a
+      // future mtime keep it forever.
+      if (Math.abs(now - mtimeMs) > graceMs) await rm(full, { recursive: true, force: true }).catch(() => {})
     } catch { /* raced away already */ }
   }))
 }
@@ -119,6 +122,8 @@ export const _lockTestHooks = {}
 
 /** Liveness probe for a pid (signal 0 checks existence only). */
 function pidAlive(pid) {
+  // pid 0 signals the caller's own process group; it is never a valid owner.
+  if (!Number.isInteger(pid) || pid <= 0) return false
   if (pid === process.pid) return true
   try {
     process.kill(pid, 0)
@@ -170,7 +175,10 @@ async function judgeLock(lockPath, graceMs) {
   } catch {
     return 'gone'
   }
-  return Date.now() - mtimeMs > graceMs ? 'stale' : 'held'
+  // An ownerless husk from a future clock (snapshot restore, clock step back)
+  // is stale: a legitimate in-flight create is only seconds old.
+  const age = Date.now() - mtimeMs
+  return age > graceMs || age < -graceMs ? 'stale' : 'held'
 }
 
 /**
@@ -184,7 +192,7 @@ async function gateLive(gatePath) {
   const g = await readOwnerRecord(gatePath)
   if (g !== undefined) return Number.isInteger(g.pid) && pidAlive(g.pid)
   try {
-    return Date.now() - (await stat(gatePath)).mtimeMs <= GATE_STALE_MS
+    return Math.abs(Date.now() - (await stat(gatePath)).mtimeMs) <= GATE_STALE_MS
   } catch {
     return false // vanished mid-check
   }
@@ -300,6 +308,7 @@ async function acquireStoreLock(file, opts) {
   const deadline = Date.now() + opts.timeoutMs
   const timedOut = () => new Error(`timed out after ${opts.timeoutMs}ms waiting for the target-store lock ${lockPath} (held by another process)`)
   for (;;) {
+    if (opts.signal?.aborted) throw new Error('aborted')
     let created = false
     // A live recovery gate owns the next move on the lock: don't create it,
     // and don't start a competing recovery underneath an in-flight verdict.
@@ -346,6 +355,10 @@ async function acquireStoreLock(file, opts) {
           // BEFORE our owner record landed; wait it out, then re-confirm our
           // token is still on disk before trusting the lock.
           while (await gateLive(gatePath)) {
+            if (opts.signal?.aborted) {
+              await releaseStoreLock({ lockPath, token }) // never hold a cancelled caller's lock
+              throw new Error('aborted')
+            }
             if (Date.now() >= deadline) {
               await releaseStoreLock({ lockPath, token }) // don't leak our own verified lock
               throw timedOut()
@@ -397,6 +410,7 @@ async function releaseStoreLock(handle) {
 export function withStoreLock(file, fn, opts) {
   const prev = storeQueues.get(file) ?? Promise.resolve()
   const run = prev.then(async () => {
+    opts?.signal?.throwIfAborted?.()
     await mkdir(dirname(file), { recursive: true, mode: 0o700 })
     const lockOpts_ = lockOpts(opts)
     const handle = await acquireStoreLock(file, lockOpts_)

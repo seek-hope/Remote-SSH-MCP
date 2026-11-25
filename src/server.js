@@ -17,7 +17,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
     instructions: [
       'Use remote_ssh_targets to list or manage hosts. Every workspace/job tool requires an explicit target; there is no current host.',
       'Workspace paths are remote; relative paths use the target root, a working directory, not a sandbox. Each bash call starts a fresh shell. Read files before editing.',
-      'SSH authentication may open a terminal on the machine running this service; the user enters SSH passwords/passphrases directly into OpenSSH. Use the sudo tool for commands requiring root: its terminal script reads the sudo password and pipes it over SSH. Never request passwords in chat or put them in commands or tool arguments.',
+      'SSH authentication may open a terminal on the machine running this service; the user enters SSH passwords/passphrases directly into OpenSSH. Use the sudo tool for commands requiring root: it first checks a passwordless sudo without running the command, otherwise it validates a cached or newly entered password (kept only in this process memory for at most 20 minutes by default) before running the command, and only opens a terminal when a password is needed. The password never appears in tool arguments, results, logs or argv. Never request passwords in chat or put them in commands or tool arguments.',
       'Connection preparation precedes command timeouts; allow extra time for it in the MCP client request timeout. A foreground timeout or cancellation does not guarantee that the remote command stopped. Check remote state before retrying commands with side effects.',
       'For long commands use bash run_in_background, then job_output/job_kill with the same target and job_id. If launch fails with a job_id, query that ID before launching again. Jobs and logs survive MCP restarts.',
       'Paginate job_output with next_offset. has_more:false is not proof of completion; check status and exit_code. Only clean up finished jobs after consuming the needed output; cleanup:true permanently deletes the job record and logs.',
@@ -30,7 +30,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
   const oncancel = protocol._oncancel.bind(protocol)
   protocol._oncancel = async (notification) => {
     if (notification.params?.requestId === 0) {
-      protocol._requestHandlerAbortControllers.get(0)?.abort(notification.params.reason)
+      protocol._requestHandlerAbortControllers?.get?.(0)?.abort(notification.params.reason)
       return
     }
     return oncancel(notification)
@@ -47,7 +47,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
       }
     })
   }
-  register('remote_ssh_targets', 'List/add/update/remove SSH targets or connect/disconnect/check a ControlMaster. add/update verify the remote root and may open a terminal for authentication. Changes apply to the next call. remove deletes only the target configuration, not remote files or jobs. disconnect closes a shared ControlMaster and may interrupt other calls using it. No passwords are accepted or stored.', manageSchema,
+  register('remote_ssh_targets', 'List/add/update/remove SSH targets or connect/disconnect/check a ControlMaster. add/update verify the remote root and may open a terminal for authentication. Changes apply to the next call. remove deletes only the target configuration, not remote files or jobs. remove/update (on an ssh or port change) and disconnect also drop the target SSH destination\'s cached sudo password. disconnect closes a shared ControlMaster and may interrupt other calls using it. No passwords are accepted or stored in the target configuration.', manageSchema,
     (args, signal) => manageTargets(args, storeFile, signal))
 
   for (const make of [makeReadTool, makeWriteTool, makeEditTool, makeGlobTool, makeGrepTool, makeBashTool, makeSudoTool]) {
@@ -66,7 +66,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
   }
 
   const jobFields = { target: targetArg, job_id: z.uuid().describe('Job ID returned by background bash or its launch error. Use the same remote host/account that started the job.') }
-  register('job_output', 'Read remote job status and merged stdout/stderr. Reuse next_offset for byte pagination. has_more:false means no more output currently, not that the job ended. completed does not mean success: check exit_code. IDs survive MCP restarts. The SSH request timeout is 120 seconds, excluding connection preparation; it does not limit job runtime.', z.strictObject({
+  register('job_output', 'Read remote job status and merged stdout/stderr. Reuse next_offset for byte pagination. has_more:false means no more output currently, not that the job ended. completed does not mean success: check exit_code. For a v3 job, status "lost" means the worker died before finishing its bookkeeping (for example OOM or kill -9); descendants may still be running and cleanup is refused. Older jobs use the previous status rule. IDs survive MCP restarts. The SSH request timeout is 120 seconds, excluding connection preparation; it does not limit job runtime.', z.strictObject({
     ...jobFields,
     offset: z.number().int().nonnegative().optional().describe('0-based byte offset, not a line number. Default 0; pass next_offset from the previous result to continue.'),
     limit: z.number().int().min(1).max(65536).optional().describe('Maximum output bytes to read; default and maximum 65536.'),
@@ -76,7 +76,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
     await readyTarget(target, signal)
     return remoteJob(target, { action: 'output', ...args }, signal)
   })
-  register('job_kill', 'Terminate a remote background job process group. The remote worker escalates TERM to SIGKILL after a 3-second grace period, so termination continues even if this request is interrupted. It reaps same-group descendants that ignore TERM; detached sessions or daemons may still escape. killed means the signal was accepted, not that every process is gone. Output remains available through job_output. The SSH request timeout is 120 seconds, excluding connection preparation; query job_output to check state after a request failure.', z.strictObject(jobFields), async ({ target: name, ...args }, signal) => {
+  register('job_kill', 'Terminate a remote background job process group. The remote worker escalates TERM to SIGKILL after a 3-second grace period, so termination continues even if this request is interrupted. It reaps same-process-group and same-session descendants that ignore TERM; detached sessions or daemons may still escape. For a v3 job, killed means the worker accepted the termination and finished its bookkeeping; if the worker died first the status is lost and descendants may still be running. Output remains available through job_output; this response includes the first chunk (offset 0, up to 65536 bytes). worker_missing:true means the worker is gone and its descendants may still be running. The SSH request timeout is 120 seconds, excluding connection preparation; query job_output to check state after a request failure.', z.strictObject(jobFields), async ({ target: name, ...args }, signal) => {
     const target = await findTarget(storeFile, name)
     await readyTarget(target, signal)
     return remoteJob(target, { action: 'kill', ...args }, signal)

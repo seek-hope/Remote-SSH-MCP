@@ -6,7 +6,9 @@ const MAX_CONTROL_PERSIST_SECONDS = 31_536_000
 
 export const targetFields = {
   name: z.string().trim().min(1).optional().describe('Unique target name; defaults to the SSH destination.'),
-  ssh: z.string().trim().min(1).regex(/^(?!-)[^\s\0]+$/, 'Expected an SSH alias or user@host, not an option.').describe('SSH alias or user@host; host:port and [IPv6]:port are accepted. Uses ~/.ssh/config.'),
+  // Keep this pattern portable: providers compile tool schemas with non-JavaScript
+  // engines that reject lookaround (e.g. "^(?!-)") and bare "\0" escapes.
+  ssh: z.string().trim().min(1).regex(/^[^-\s\x00][^\s\x00]*$/, 'Expected an SSH alias or user@host, not an option.').describe('SSH alias or user@host; host:port and [IPv6]:port are accepted. Uses ~/.ssh/config.'),
   port: z.number().int().min(1).max(65535).optional(),
   root: z.string().startsWith('/').refine(p => !p.includes('\0') && !p.split('/').includes('..'), 'Root must be an absolute remote path without NUL or .. segments.').describe('Default remote working directory, not a filesystem sandbox.'),
   controlPersist: z.number().int().min(0).max(MAX_CONTROL_PERSIST_SECONDS).nullable().optional().describe('Connection reuse in seconds; default 43200. 0/null disables reuse and requires noninteractive key/agent authentication.'),

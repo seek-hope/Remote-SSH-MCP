@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { buildConnectCommand, openConnectTerminal, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
+import { buildConnectCommand, openConnectTerminal, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
 import { installFakeSsh } from './helpers.mjs'
 
 test('command and authentication sessions isolate interactive SSH settings but preserve the route and identity', async () => {
@@ -153,4 +153,13 @@ test('Linux terminal detection tries the next launcher after an immediate failur
     }
     await fake.cleanup()
   }
+})
+
+test('the credential identity resolves host, user and port through ssh -G', async () => {
+  const identity = await resolveSshIdentity({ ssh: 'h' })
+  if (identity === undefined) return // ssh -G unavailable in this environment
+  const [host, user, port] = identity.split('\u0000')
+  assert.ok(host.length > 0)
+  assert.ok(user.length > 0)
+  assert.match(port, /^\d+$/)
 })

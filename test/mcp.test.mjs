@@ -117,6 +117,22 @@ test('MCP schemas, explicit target routing, CRUD and file operations', async () 
 test('MCP exposes authentication, timeout and job safety guidance in tool metadata', async () => fixture(async ({ client }) => {
   const { tools } = await client.listTools()
   const byName = Object.fromEntries(tools.map(tool => [tool.name, tool]))
+  for (const tool of tools) {
+    const patterns = []
+    const collect = value => {
+      if (Array.isArray(value)) return value.forEach(collect)
+      if (!value || typeof value !== 'object') return
+      if (typeof value.pattern === 'string') patterns.push(value.pattern)
+      for (const [key, child] of Object.entries(value)) if (key !== 'pattern') collect(child)
+    }
+    collect(tool.inputSchema)
+    // Some providers compile `pattern` with RE2/Rust-style engines that reject
+    // lookaround and "\0", failing the entire request instead of one field.
+    for (const pattern of patterns) {
+      assert.doesNotMatch(pattern, /\(\?[=!<]/, `${tool.name} schema pattern uses lookaround: ${pattern}`)
+      assert.doesNotMatch(pattern, /\\0/, `${tool.name} schema pattern uses a NUL escape: ${pattern}`)
+    }
+  }
   const output = byName.job_output.inputSchema.properties
   assert.match(output.offset.description, /0-based byte offset/)
   assert.match(output.limit.description, /bytes.*65536/)
@@ -129,7 +145,7 @@ test('MCP exposes authentication, timeout and job safety guidance in tool metada
   assert.match(byName.job_kill.description, /escalates TERM to SIGKILL/)
   assert.match(byName.bash.description, /query it before retrying/)
   assert.match(byName.bash.inputSchema.properties.run_in_background.description, /timeoutMs is ignored/)
-  assert.match(byName.sudo.inputSchema.properties.timeoutMs.description, /excludes prior SSH connection preparation and terminal launch/)
+  assert.match(byName.sudo.inputSchema.properties.timeoutMs.description, /excludes prior SSH connection preparation/)
   assert.match(byName.sudo.description, /remote command may continue/)
   assert.match(byName.remote_ssh_targets.description, /remove deletes only the target configuration/)
   assert.match(byName.remote_ssh_targets.description, /disconnect closes a shared ControlMaster/)

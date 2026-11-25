@@ -10,6 +10,9 @@ import tempfile
 MAX_EDIT_BYTES = 4 * 1024 * 1024
 MAX_READ_BYTES = 1024 * 1024
 MAX_READ_LINES = 2000
+# Files up to this size also report an exact total line count. Larger files
+# only return the requested window, so paging does not rescan the whole file.
+TOTAL_LINES_SCAN_BYTES = 8 * 1024 * 1024
 
 
 def fingerprint(info):
@@ -19,12 +22,22 @@ def fingerprint(info):
 def atomic_write(path, source, size, digest=None, expected=None):
     """Verify the entire input before replacing; a valid prefix is not success.
 
+    Symlinks are followed: the target file is replaced and the link stays a
+    link. An existing non-regular target (FIFO, device, directory) is refused.
     New files stay private (0600). Existing permission bits are preserved;
     failures to preserve them are fatal. This is atomic replacement, not a
     filesystem lock or a promise of durability across power loss.
     """
+    path = os.path.realpath(path)
     parent = os.path.dirname(path)
     os.makedirs(parent, exist_ok=True)
+    try:
+        existing = os.stat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise ValueError('refusing to replace a non-regular file')
+    existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
     fd, tmp = tempfile.mkstemp(prefix='.remote-ssh-tmp-', dir=parent)
     try:
         with os.fdopen(fd, 'wb') as output:
@@ -41,12 +54,8 @@ def atomic_write(path, source, size, digest=None, expected=None):
                 output.write(chunk)
             if received != size or (digest is not None and checksum.hexdigest() != digest):
                 raise ValueError('upload integrity check failed: byte count or SHA-256 differs')
-            try:
-                original = os.stat(path)
-            except FileNotFoundError:
-                original = None
-            if original is not None:
-                os.fchmod(output.fileno(), stat.S_IMODE(original.st_mode))
+            if existing_mode is not None:
+                os.fchmod(output.fileno(), existing_mode)
         # Check after writing and closing the temporary file, immediately
         # before replacing. Non-cooperating writers can still race this check.
         if expected is not None:
@@ -64,25 +73,51 @@ def atomic_write(path, source, size, digest=None, expected=None):
             pass
 
 
+def open_regular(path):
+    """Open a regular file without blocking on a FIFO/device.
+
+    O_NONBLOCK makes a writerless FIFO open return immediately; fstat then
+    rejects anything that is not a regular file. This closes the stat/open
+    race where a path is swapped for a FIFO after the check. The returned
+    file object owns the descriptor.
+    """
+    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NONBLOCK', 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('not a regular file')
+        return os.fdopen(fd, 'rb'), info
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def read_window(path, offset, limit):
     if offset < 1 or not 1 <= limit <= MAX_READ_LINES:
         raise ValueError('invalid read offset or limit')
+    source, info = open_regular(path)
+    eager_total = info.st_size <= TOTAL_LINES_SCAN_BYTES
     body, pending = bytearray(), bytearray()
     line = 1
     returned = 0
     newlines = 0
     last = b''
     byte_limited = False
-    with open(path, 'rb') as source:
-        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
-            raise ValueError('not a regular file')
+    eof = False
+    with source:
         # Count the whole file in one forward pass, but only split/retain the
         # requested window. Even a single enormous line uses bounded memory.
+        # For files over TOTAL_LINES_SCAN_BYTES the pass stops once the window
+        # is complete; the exact total is then unknown (null) instead of
+        # rescanning the entire file on every page.
         for block in iter(lambda: source.read(65536), b''):
             count = block.count(b'\n')
             newlines += count
             last = block[-1:]
             if byte_limited or line >= offset + limit:
+                if not eager_total:
+                    break
                 continue
             if line + count < offset:
                 line += count
@@ -107,10 +142,13 @@ def read_window(path, offset, limit):
                     line += 1
                 if line >= offset + limit:
                     break
+        else:
+            eof = True
     if pending and not byte_limited:
         body.extend(pending)
         returned += 1
-    total = newlines + int(bool(last) and last != b'\n')
+    # Exact only when the scan reached EOF; large files report null.
+    total = (newlines + int(bool(last) and last != b'\n')) if eof else None
     try:
         text = body.decode('utf-8')
     except UnicodeDecodeError:
@@ -125,10 +163,9 @@ def edit_file(path, request):
     old, new = request['old_string'], request['new_string']
     if not old or '\0' in old or '\0' in new:
         raise ValueError('edit requires nonempty old_string and UTF-8 text without NUL')
-    with open(path, 'rb') as source:
-        info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError('not a regular file')
+    path = os.path.realpath(path)
+    source, info = open_regular(path)
+    with source:
         expected = fingerprint(info)
         data = source.read(MAX_EDIT_BYTES + 1)
         if fingerprint(os.fstat(source.fileno())) != expected:
@@ -171,8 +208,17 @@ def main():
 
 
 if __name__ == '__main__':
+    # The MCP transport is UTF-8 JSON; do not depend on the remote account's
+    # locale for stdin, stdout or stderr, and keep escaped filenames/errors
+    # from raising again.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+        except (AttributeError, ValueError):
+            pass
     try:
-        print(json.dumps(main(), ensure_ascii=False))
+        # ensure_ascii keeps the helper's stdout encodable under any locale.
+        print(json.dumps(main(), ensure_ascii=True))
     except Exception as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
