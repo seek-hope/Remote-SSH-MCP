@@ -30,13 +30,14 @@ pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 # as two stars, so the documented budget is not stricter than it claims.
 def wildcard_budget(pat):
     globstars = stars = questions = braces = 0
+    classes_exhausted = False
     i = 0
     while i < len(pat):
         c = pat[i]
         if c == '\\' and i + 1 < len(pat):
             i += 2
             continue
-        if c == '[':
+        if c == '[' and not classes_exhausted:
             j = i + 1
             if j < len(pat) and pat[j] in ('!', '^'):
                 j += 1
@@ -49,7 +50,12 @@ def wildcard_budget(pat):
                 if pat[j] == ']':
                     break
                 j += 1
-            i = j + 1 if j < len(pat) else i + 1
+            if j >= len(pat):
+                # No later '[' can close either; avoid rescanning to the end.
+                classes_exhausted = True
+                i += 1
+                continue
+            i = j + 1
             continue
         if c == '*':
             if i + 1 < len(pat) and pat[i + 1] == '*':
@@ -149,9 +155,14 @@ if not stat.S_ISDIR(root_stat.st_mode):
 
 def translate(pat):
     out, i, n = [], 0, len(pat)
+    classes_exhausted = False
     while i < n:
         c = pat[i]
-        if c == '*':
+        if c == '\\' and i + 1 < n:
+            # Shell-like escape: the next character is literal. This matches
+            # wildcard_budget(), which does not count escaped wildcards.
+            out.append(re.escape(pat[i + 1])); i += 2
+        elif c == '*':
             if i + 1 < n and pat[i + 1] == '*':
                 # '**/' or trailing '**'
                 if i + 2 < n and pat[i + 2] == '/':
@@ -169,7 +180,7 @@ def translate(pat):
             else:
                 alts = [translate(p) for p in pat[i + 1:j].split(',')]
                 out.append('(?:' + '|'.join(alts) + ')'); i = j + 1
-        elif c == '[':
+        elif c == '[' and not classes_exhausted:
             # POSIX allows ']' as the first class member ([]] matches ']'),
             # and '!' negation before it ([!]]). A naive first-']' search
             # produces invalid regexes for those forms.
@@ -188,6 +199,9 @@ def translate(pat):
                     break
                 j += 1
             if j >= n:
+                # No later '[' can close either; treat the rest as literals
+                # without rescanning to the end for every '['.
+                classes_exhausted = True
                 out.append(re.escape(c)); i += 1
             else:
                 out.append(translate_class(pat[i + 1:j])); i = j + 1

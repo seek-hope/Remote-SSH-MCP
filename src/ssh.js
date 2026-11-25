@@ -518,8 +518,9 @@ export async function sshRun(opts) {
         return buf.subarray(0, idx)
       }
       const text = buf.subarray(idx + needle.length, end).toString('latin1').trim()
-      if (/^\d+$/.test(text)) {
-        markerCode = Number(text)
+      const code = Number(text)
+      if (/^\d{1,3}$/.test(text) && code <= 255) {
+        markerCode = code
         return buf.subarray(0, idx)
       }
       search = idx + needle.length
@@ -541,7 +542,11 @@ export async function sshRun(opts) {
       const capTail = (text) => {
         const bytes = Buffer.from(text, 'utf8')
         if (bytes.length <= maxStdout) return text
-        return bytes.subarray(bytes.length - maxStdout).toString('utf8')
+        let start = bytes.length - maxStdout
+        // Do not start inside a multi-byte character: U+FFFD expansion would
+        // push the re-encoded result above the byte cap.
+        while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1
+        return bytes.subarray(start).toString('utf8')
       }
       let commandOutput = capTail(stdout)
       if (markerCode !== undefined) commandOutput = commandOutput.replace(/\n$/, '')

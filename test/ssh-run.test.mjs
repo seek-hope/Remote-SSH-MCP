@@ -108,6 +108,21 @@ test('sshRun decodes a no-marker tail across the carry boundary', async () => {
   }
 })
 
+test('sshRun never returns more than maxStdout bytes at a UTF-8 boundary', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_STDOUT = '😀'.repeat(20)
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    const result = await sshRun({ target: 'h', command: 'true', controlPersist: 0, maxStdout: 10 })
+    assert.ok(Buffer.byteLength(result.stdout, 'utf8') <= 10, `byte cap (${Buffer.byteLength(result.stdout)})`)
+    assert.doesNotMatch(result.stdout, /\uFFFD/)
+  } finally {
+    delete process.env.FAKE_SSH_STDOUT
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+})
+
 test('a complete marker survives a descendant that floods stdout after it', async () => {
   const ssh = await installLocalSsh()
   try {

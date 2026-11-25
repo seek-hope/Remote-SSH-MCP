@@ -307,6 +307,58 @@ test('glob cap header does not blame non-UTF-8 names for the item cap', async ()
   }
 })
 
+test('glob backslash escapes the next character and is not counted by the budget', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-escape-'))
+  try {
+    await writeFile(join(dir, '*a'), '')
+    await writeFile(join(dir, 'za'), '')
+    const run = (pattern) => {
+      const parts = execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '10'], { encoding: 'utf8' }).split('\0')
+      parts.pop()
+      return parts.filter(Boolean).sort()
+    }
+    assert.deepEqual(run('\\*a'), [join(dir, '*a')])
+    // Six escaped wildcards are literals; this must neither be rejected nor
+    // backtrack exponentially.
+    const started = Date.now()
+    assert.deepEqual(run('\\*a'.repeat(6)), [])
+    assert.ok(Date.now() - started < 2000)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('grep skips binary files instead of reporting them as parseable', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-binary-'))
+  try {
+    await writeFile(join(dir, 'bin.dat'), Buffer.from('hit\0more'))
+    const grep = makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+    const out = await grep.execute({ pattern: 'hit' }, exec)
+    assert.match(out, /No parseable matches/)
+    assert.doesNotMatch(out, /binary file matches/)
+    assert.doesNotMatch(out, /record\(s\) skipped/)
+    const calls = await ssh.readLog()
+    // -rHInE already includes -I (skip binary files).
+    assert.match(remoteCommand(calls.at(-1)), /grep -rHInE -D skip/)
+  } finally {
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('glob handles many unclosed brackets without quadratic scanning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-brackets-'))
+  try {
+    const started = Date.now()
+    const out = execFileSync('python3', ['-c', GLOB_PY, '['.repeat(10000), dir, '10'], { encoding: 'utf8' })
+    assert.match(out, /__REMOTE_SSH_TOTAL__0/)
+    assert.ok(Date.now() - started < 2000, `unclosed classes stay linear (${Date.now() - started}ms)`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('glob bracket classes handle a literal ] and reject invalid ranges cleanly', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-class-'))
   try {

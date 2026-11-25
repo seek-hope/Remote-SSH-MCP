@@ -29,8 +29,10 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
   const protocol = server.server
   const oncancel = protocol._oncancel.bind(protocol)
   protocol._oncancel = async (notification) => {
-    if (notification.params?.requestId === 0) {
-      protocol._requestHandlerAbortControllers?.get?.(0)?.abort(notification.params.reason)
+    const id = notification.params?.requestId
+    // The SDK drops every falsy id; both 0 and '' are valid RequestIds.
+    if ((typeof id === 'string' || typeof id === 'number') && !id) {
+      protocol._requestHandlerAbortControllers?.get?.(id)?.abort(notification.params.reason)
       return
     }
     return oncancel(notification)

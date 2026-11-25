@@ -75,6 +75,25 @@ async function fixture(run) {
   }
 }
 
+test('the cancel workaround aborts zero and empty-string request ids', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-cancel-'))
+  const server = createServer({ storeFile: join(dir, 'targets.json') })
+  try {
+    const protocol = server.server
+    const aborted = []
+    protocol._requestHandlerAbortControllers = new Map([
+      [0, { abort: () => aborted.push(0) }],
+      ['', { abort: () => aborted.push('') }],
+    ])
+    await protocol._oncancel({ params: { requestId: 0 } })
+    await protocol._oncancel({ params: { requestId: '' } })
+    assert.deepEqual(aborted, [0, ''])
+  } finally {
+    await server.close?.()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('MCP schemas, explicit target routing, CRUD and file operations', async () => fixture(async ({ dir, file, client, call, json, log }) => {
   const { tools } = await client.listTools()
   assert.deepEqual(tools.map(t => t.name).sort(), ['bash', 'edit', 'glob', 'grep', 'job_kill', 'job_output', 'read', 'remote_ssh_targets', 'sudo', 'write'])
