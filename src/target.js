@@ -29,13 +29,16 @@ export const targetFields = {
     .regex(/^[^-\s\x00][^\s\x00]*$/, 'Expected an SSH alias or user@host, not an option.')
     .refine(value => !hasUnpairedSurrogate(value), 'SSH destination must not contain unpaired UTF-16 surrogates.')
     .describe('SSH alias or user@host; host:port and [IPv6]:port are accepted. Uses ~/.ssh/config.'),
-  port: z.number().int().min(1).max(65535).optional(),
+  // null is the management/update spelling for "clear the override"; accept it
+  // in a hand-edited store too and normalize it to undefined.
+  port: z.number().int().min(1).max(65535).nullable().optional(),
   root: z.string().startsWith('/').refine(p => !p.includes('\0') && !p.split('/').includes('..') && !hasUnpairedSurrogate(p), 'Root must be an absolute remote path without NUL, .. segments, or unpaired UTF-16 surrogates.').describe('Default remote working directory, not a filesystem sandbox.'),
   controlPersist: z.number().int().min(0).max(MAX_CONTROL_PERSIST_SECONDS).nullable().optional().describe('Connection reuse in seconds; default 43200. 0/null disables reuse and requires noninteractive key/agent authentication.'),
 }
 
 const targetSchema = z.strictObject(targetFields).transform(entry => {
   let { ssh, port } = entry
+  if (port === null) port = undefined
   const inline = ssh.match(/^([^:]+|.*\]):(\d+)$/u)
   if (inline) {
     ssh = inline[1]

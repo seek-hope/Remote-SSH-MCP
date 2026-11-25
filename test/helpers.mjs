@@ -289,11 +289,17 @@ if [ "$vflag" = 1 ]; then
   printf 'sudo: a password is required\\n' >&2
   exit 1
 fi
-if [ "$nflag" = 1 ]; then
-  # A command run needs NOPASSWD (the probe succeeded) or a ticket keyed to
-  # this parent. The latter is what a real ppid-keyed sudo checks, so an
-  # exec-optimized final sudo (different parent) fails this test.
-  if [ "\${FAKE_SUDO_TICKET:-0}" = 1 ] || ticket; then
+  if [ "$nflag" = 1 ]; then
+    # A denied wrapper echoes the whole command line, including the marker
+    # tokens; the service must still report that the command never ran.
+    if [ "\${FAKE_SUDO_DENY_WRAPPER:-0}" = 1 ]; then
+      printf 'Sorry, user test is not allowed to execute '\''%s'\'' as root on host.\\n' "$*" >&2
+      exit 1
+    fi
+    # A command run needs NOPASSWD (the probe succeeded) or a ticket keyed to
+    # this parent. The latter is what a real ppid-keyed sudo checks, so an
+    # exec-optimized final sudo (different parent) fails this test.
+    if [ "\${FAKE_SUDO_TICKET:-0}" = 1 ] || ticket; then
     while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
     if [ "$1" = "--" ]; then shift; fi
     exec "$@"
@@ -313,6 +319,7 @@ export async function installFakeSudo({
   noTicket = false,
   policy = false,
   failAfterProbe = false,
+  denyWrapper = false,
 } = {}) {
   const ownsDir = dir === undefined
   const fakeDir = dir ?? await mkdtemp(join(tmpdir(), 'dsh-fake-sudo-'))
@@ -333,6 +340,7 @@ export async function installFakeSudo({
     FAKE_SUDO_NO_TICKET: process.env.FAKE_SUDO_NO_TICKET,
     FAKE_SUDO_POLICY: process.env.FAKE_SUDO_POLICY,
     FAKE_SUDO_FAIL_AFTER_PROBE: process.env.FAKE_SUDO_FAIL_AFTER_PROBE,
+    FAKE_SUDO_DENY_WRAPPER: process.env.FAKE_SUDO_DENY_WRAPPER,
   }
   process.env.PATH = `${fakeDir}:${process.env.PATH}`
   process.env.FAKE_SUDO_LOG = log
@@ -343,6 +351,7 @@ export async function installFakeSudo({
   process.env.FAKE_SUDO_NO_TICKET = noTicket ? '1' : '0'
   process.env.FAKE_SUDO_POLICY = policy ? '1' : '0'
   process.env.FAKE_SUDO_FAIL_AFTER_PROBE = failAfterProbe ? '1' : '0'
+  process.env.FAKE_SUDO_DENY_WRAPPER = denyWrapper ? '1' : '0'
   return {
     dir: fakeDir,
     log,

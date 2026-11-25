@@ -134,6 +134,8 @@ test('a target ssh destination rejects unpaired surrogates', () => {
   assert.throws(() => parseTargets([{ ssh: 'h\ud800', root: '/' }]), /surrogate/)
   assert.throws(() => parseTargets([{ ssh: 'h', root: '/bad\ud800' }]), /surrogate/)
   assert.throws(() => parseTargets([{ ssh: 'h', name: 'bad\ud800', root: '/' }]), /surrogate/)
+  // A hand-edited store may use null to mean "no override".
+  assert.equal(parseTargets([{ ssh: 'h', root: '/', port: null }])[0].port, undefined)
 })
 
 test('resolveSshIdentity keeps a complete -G answer held open by a descendant', async () => {

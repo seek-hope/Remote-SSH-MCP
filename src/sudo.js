@@ -476,11 +476,14 @@ function stripMarks(stderr, marks) {
   return kept.join('\n')
 }
 
-/** Compact stderr for a reported error. */
+/** Compact stderr for a reported error, keeping a leading policy line. */
 function errorDetail(stderr, marks) {
-  return stripMarks(stderr, marks).trim().split('\n').slice(-3)
-    .map((line) => line.slice(0, 300))
-    .join('\n')
+  const lines = stripMarks(stderr, marks).trim().split('\n').filter(line => line.trim() !== '')
+  if (lines.length === 0) return ''
+  const policy = lines.find(line => /^(Sorry\b|sudo:|\[sudo\]|bash:)/i.test(line.trim()))
+  const tail = lines.slice(-3)
+  const chosen = policy !== undefined && !tail.includes(policy) ? [policy, ...tail] : tail
+  return chosen.map((line) => line.slice(0, 300)).join('\n')
 }
 
 /** Independent random tokens so knowing one marker never reveals another. */
@@ -550,11 +553,16 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
   // scanning a bounded head of stderr so a command that floods stderr (and
   // then exits before POST) is still recognized as having run.
   const seen = `${result.stderrHead ?? ''}\n${result.stderr ?? ''}`
+  // Markers are printed as standalone lines. Substring matching would also
+  // match sudo's denial message, which echoes the wrapper command line
+  // containing the marker tokens without ever running the command.
+  const seenLines = new Set(seen.split('\n').map((line) => line.trim()))
+  const saw = (mark) => seenLines.has(mark)
   // START/POST are authoritative: once the command was reached, marker-looking
   // text it printed itself (for example its own /proc/$$/cmdline, which
   // contains the cd/start/post tokens) must not turn a completed run into a
   // false cd/auth/ticket failure.
-  const ran = seen.includes(marks.start) || seen.includes(marks.post)
+  const ran = saw(marks.start) || saw(marks.post)
   if (mode !== 'probe' && ran) {
     return {
       ok: true,
@@ -565,20 +573,20 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
       stderrTruncated: result.stderrTruncated,
     }
   }
-  if (seen.includes(marks.drain)) {
+  if (saw(marks.drain)) {
     return { ok: false, error: 'the sudo password could not be drained safely before the command; no command was run' }
   }
-  if (seen.includes(marks.ticket)) {
+  if (saw(marks.ticket)) {
     return {
       ok: false,
       error: `sudo on "${target.name}" authenticated but did not keep a credential ticket; the remote sudoers needs a nonzero timestamp_timeout (or NOPASSWD) for this tool`,
     }
   }
-  if (seen.includes(marks.cd)) {
+  if (saw(marks.cd)) {
     return { ok: false, error: `cannot change to remote working directory ${workdir}` }
   }
   if (mode === 'probe') {
-    if (result.code === 0 && seen.includes(marks.probeOk)) {
+    if (result.code === 0 && saw(marks.probeOk)) {
       return {
         ok: true,
         code: 0,
@@ -586,12 +594,12 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
         stderr: stripMarks(result.stderr, marks),
       }
     }
-    if (!seen.includes(marks.probe)) {
+    if (!saw(marks.probe)) {
       return { ok: false, error: `the sudo probe did not complete (exit ${result.code ?? 'unknown'})${detail ? `: ${detail}` : ''}` }
     }
   }
-  const failed = (mode === 'probe' && seen.includes(marks.probe))
-    || (mode === 'password' && seen.includes(marks.auth))
+  const failed = (mode === 'probe' && saw(marks.probe))
+    || (mode === 'password' && saw(marks.auth))
   if (failed) {
     if (SETUP_RE.test(detail)) {
       return { ok: false, error: `sudo is not available on the remote host: ${detail || 'command not found'}` }

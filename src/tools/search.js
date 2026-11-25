@@ -36,10 +36,6 @@ CLASS_SPECIAL = set('\\]^-&|~[')
 def class_escape(ch):
     return '\\' + ch if ch in CLASS_SPECIAL else ch
 
-def range_safe(ch):
-    # Escaped endpoints are valid regex range endpoints ([\--c], [\]-a]);
-    # only the path separator is forbidden in a class.
-    return ch != '/'
 
 def translate_class(body):
     negate = body[:1] in ('!', '^')
@@ -59,9 +55,21 @@ def translate_class(body):
     i = 0
     while i < len(tokens):
         ch, literal = tokens[i]
-        if (i + 2 < len(tokens) and tokens[i + 1][0] == '-' and not tokens[i + 1][1]
-                and range_safe(ch) and range_safe(tokens[i + 2][0])):
-            members.append(class_escape(ch) + '-' + class_escape(tokens[i + 2][0]))
+        if i + 2 < len(tokens) and tokens[i + 1][0] == '-' and not tokens[i + 1][1]:
+            raw_end = tokens[i + 2][0]
+            start, end = ch, raw_end
+            # A class never matches '/', so remove it from the interval by
+            # narrowing the endpoint to the adjacent character.
+            if start == '/':
+                start = chr(ord('/') + 1)
+            if end == '/':
+                end = chr(ord('/') - 1)
+            if ord(ch) > ord(raw_end):
+                # Keep a reversed range invalid so re.compile reports it.
+                members.append(class_escape(ch) + '-' + class_escape(raw_end))
+            elif ord(start) <= ord(end):
+                members.append(class_escape(start) + '-' + class_escape(end))
+            # else the interval contained only '/', which is already excluded.
             i += 3
             continue
         if ch == '/':
@@ -338,7 +346,9 @@ export function makeGrepTool(target, cwd = target.root) {
           text = `${text.slice(0, cut)}...[line truncated]`
         }
         const record = `${m[1]}:${text}`
-        const cost = Buffer.byteLength(JSON.stringify(file)) + Buffer.byteLength(JSON.stringify(record)) + 4
+        // The filename is emitted once per group, not once per match.
+        const fileCost = groups.has(file) ? 0 : Buffer.byteLength(JSON.stringify(file)) + 2
+        const cost = fileCost + Buffer.byteLength(JSON.stringify(record)) + 4
         if (bytes + cost > MAX_GREP_BYTES) {
           cut = true
           break

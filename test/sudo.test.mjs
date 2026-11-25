@@ -523,6 +523,19 @@ test('a changed resolved SSH identity drops the cached credential', async () => 
   }
 })
 
+test('a wrapper denial is an error even though sudo echoes the marker command line', async () => {
+  const h = await harness({ ticket: true, denyWrapper: true })
+  try {
+    const result = await run({ command: 'echo USER_COMMAND_RAN' })
+    assert.equal(result.ok, false, JSON.stringify(result))
+    assert.match(result.error, /did not run the command/)
+    assert.match(result.error, /not allowed/)
+    assert.doesNotMatch(String(result.stdout ?? ''), /USER_COMMAND_RAN/)
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a command-mode ticket re-check failure never runs the command', async () => {
   const h = await harness({ ticket: true, failAfterProbe: true })
   try {

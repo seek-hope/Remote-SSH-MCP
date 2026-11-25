@@ -273,8 +273,10 @@ test('glob bracket classes handle a literal ] and reject invalid ranges cleanly'
     for (const name of names) await writeFile(join(dir, name), '')
     await mkdir(join(dir, 'top', 'sub'), { recursive: true })
     await writeFile(join(dir, 'top', 'sub', 'x'), '')
-    await mkdir(join(dir, 'top0sub'), { recursive: true })
-    await writeFile(join(dir, 'top0sub', 'x'), '')
+    for (const top of ['top0sub', 'top-sub']) {
+      await mkdir(join(dir, top), { recursive: true })
+      await writeFile(join(dir, top, 'x'), '')
+    }
     const at = (...list) => list.map(name => join(dir, name)).sort()
     const run = (pattern) => {
       const parts = execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '100'], { encoding: 'utf8' }).split('\0')
@@ -292,12 +294,17 @@ test('glob bracket classes handle a literal ] and reject invalid ranges cleanly'
     assert.deepEqual(run('[!]-a].txt'), at('-.txt', 'b.txt', 'c.txt', 'y.txt', 'z.txt', '\\.txt'))
     assert.deepEqual(run('[--c].txt'), at('-.txt', '].txt', '^.txt', '_.txt', '`.txt', 'a.txt', 'b.txt', 'c.txt', '\\.txt'))
     assert.deepEqual(run('[\\\\-a].txt'), at('].txt', '^.txt', '_.txt', '`.txt', 'a.txt', '\\.txt'))
+    assert.deepEqual(run('[\\^-z].txt'), at('^.txt', '_.txt', '`.txt', 'a.txt', 'b.txt', 'c.txt', 'y.txt', 'z.txt'))
     // Bracket classes never consume a path separator, including a non-negated
     // range whose interval contains '/'.
-    assert.deepEqual(run('top[!a]sub/x'), at('top0sub/x'))
-    assert.deepEqual(run('top[!0]sub/x'), [])
+    assert.deepEqual(run('top[!a]sub/x'), at('top0sub/x', 'top-sub/x'))
+    assert.deepEqual(run('top[!0]sub/x'), at('top-sub/x'))
     assert.deepEqual(run('top[/]sub/x'), [])
     assert.deepEqual(run('top[.-0]sub/x'), at('top0sub/x'))
+    // An interval with '/' as an endpoint is narrowed to the surviving part.
+    assert.deepEqual(run('top[/-a]sub/x'), at('top0sub/x'))
+    assert.deepEqual(run('top[!/-0]sub/x'), at('top-sub/x'))
+    assert.deepEqual(run('top[--/]sub/x'), at('top-sub/x'))
     let failure
     try {
       execFileSync('python3', ['-c', GLOB_PY, '[z-a]', dir, '100'], { encoding: 'utf8' })
@@ -359,6 +366,26 @@ test('grep caps encoded output at 512 KiB', async () => {
   } finally {
     await ssh.cleanup()
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('grep counts a long filename once against the output cap', async () => {
+  const ssh = await installLocalSsh()
+  const base = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-longpath-'))
+  let dir = base
+  try {
+    for (let i = 0; i < 12; i++) {
+      dir = join(dir, `d${i}-${'x'.repeat(240)}`)
+      await mkdir(dir)
+    }
+    await writeFile(join(dir, 'many.txt'), 'hit\n'.repeat(250))
+    const out = await makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, base)
+      .execute({ pattern: 'hit' }, exec)
+    assert.equal(out.split('\n').filter(line => /^\d+:hit$/.test(line)).length, 250)
+    assert.doesNotMatch(out, /output truncated at 512 KiB/)
+  } finally {
+    await ssh.cleanup()
+    await rm(base, { recursive: true, force: true })
   }
 })
 
