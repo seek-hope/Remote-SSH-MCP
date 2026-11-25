@@ -122,8 +122,16 @@ def translate(pat):
                 j += 1
             if j < n and pat[j] == ']':
                 j += 1
-            j = pat.find(']', j)
-            if j == -1:
+            # Find the unescaped closing bracket; a backslash escapes the
+            # next character, including ']' ([a\]] matches 'a' or ']').
+            while j < n:
+                if pat[j] == '\\' and j + 1 < n:
+                    j += 2
+                    continue
+                if pat[j] == ']':
+                    break
+                j += 1
+            if j >= n:
                 out.append(re.escape(c)); i += 1
             else:
                 out.append(translate_class(pat[i + 1:j])); i = j + 1

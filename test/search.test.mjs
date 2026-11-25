@@ -281,6 +281,8 @@ test('glob bracket classes handle a literal ] and reject invalid ranges cleanly'
     assert.deepEqual(run('[!]].txt'), [join(dir, 'a.txt'), join(dir, 'b.txt'), join(dir, 'y.txt'), join(dir, 'z.txt'), join(dir, '-.txt')].sort())
     // A backslash-escaped '-' is a literal member, not a range endpoint.
     assert.deepEqual(run('[a\\-z].txt'), [join(dir, '-.txt'), join(dir, 'a.txt'), join(dir, 'z.txt')].sort())
+    // ... and a backslash-escaped ']' does not close the class.
+    assert.deepEqual(run('[a\\]].txt'), [join(dir, '].txt'), join(dir, 'a.txt')].sort())
     // Bracket classes never consume a path separator.
     assert.deepEqual(run('top[!a]sub/x'), [])
     assert.deepEqual(run('top[/]sub/x'), [])
