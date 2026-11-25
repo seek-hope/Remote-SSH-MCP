@@ -657,16 +657,35 @@ test('sudo output caps exclude the wrapper START marker', async () => {
     assert.equal(err.stderr.length, 64 * 1024)
     assert.equal(err.stderrTruncated, false)
 
+    const over = await run({ command: 'head -c 200000 /dev/zero | tr "\\0" E >&2' })
+    assert.equal(over.ok, true, JSON.stringify(over))
+    assert.equal(over.stderr.length, 64 * 1024)
+    assert.equal(over.stderrTruncated, true)
+
     const merged = await run({ command: 'exec 2>&1; true' })
     assert.equal(merged.ok, true, JSON.stringify(merged))
     assert.equal(merged.stdout, '')
     assert.doesNotMatch(merged.stdout, /__REMOTE_SSH_SUDO_/)
 
-    // Redirecting stderr must not capture the wrapper's marker in a file.
-    const redirect = await run({ command: 'f=$(mktemp); exec 2>"$f"; echo hi >&2; cat "$f"; rm -f "$f"' })
+    // A redirection that persists past the user command must not capture a
+    // marker in a file (this would catch a POST marker written after eval).
+    const capture = join(h.ssh.dir, 'stderr-capture')
+    const redirect = await run({ command: `exec 2>${JSON.stringify(capture)}; true` })
     assert.equal(redirect.ok, true, JSON.stringify(redirect))
-    assert.equal(redirect.stdout, 'hi')
-    assert.doesNotMatch(redirect.stdout, /__REMOTE_SSH_SUDO_/)
+    assert.equal(await readFile(capture, 'utf8'), '')
+  } finally {
+    await h.cleanup()
+  }
+})
+
+test('a stderr flood after large pre-START noise still proves execution', async () => {
+  const h = await harness({ ticket: true, preStderr: 'P'.repeat(9 * 1024) })
+  try {
+    const result = await run({ command: 'head -c 70000 /dev/zero | tr "\\0" a >&2; echo DONE' })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(result.stdout, 'DONE')
+    assert.equal(result.stderrTruncated, true)
+    assert.ok(result.stderr.length <= 64 * 1024)
   } finally {
     await h.cleanup()
   }

@@ -324,6 +324,8 @@ fi
     # this parent. The latter is what a real ppid-keyed sudo checks, so an
     # exec-optimized final sudo (different parent) fails this test.
     if [ "\${FAKE_SUDO_TICKET:-0}" = 1 ] || ticket; then
+    # Optional noise before the inner bash prints START.
+    if [ -n "\${FAKE_SUDO_PRE_STDERR:-}" ]; then printf '%s' "$FAKE_SUDO_PRE_STDERR" >&2; fi
     while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
     if [ "$1" = "--" ]; then shift; fi
     exec "$@"
@@ -344,6 +346,7 @@ export async function installFakeSudo({
   policy = false,
   failAfterProbe = false,
   denyWrapper = false,
+  preStderr = '',
 } = {}) {
   const ownsDir = dir === undefined
   const fakeDir = dir ?? await mkdtemp(join(tmpdir(), 'dsh-fake-sudo-'))
@@ -365,6 +368,7 @@ export async function installFakeSudo({
     FAKE_SUDO_POLICY: process.env.FAKE_SUDO_POLICY,
     FAKE_SUDO_FAIL_AFTER_PROBE: process.env.FAKE_SUDO_FAIL_AFTER_PROBE,
     FAKE_SUDO_DENY_WRAPPER: process.env.FAKE_SUDO_DENY_WRAPPER,
+    FAKE_SUDO_PRE_STDERR: process.env.FAKE_SUDO_PRE_STDERR,
   }
   process.env.PATH = `${fakeDir}:${process.env.PATH}`
   process.env.FAKE_SUDO_LOG = log
@@ -376,6 +380,7 @@ export async function installFakeSudo({
   process.env.FAKE_SUDO_POLICY = policy ? '1' : '0'
   process.env.FAKE_SUDO_FAIL_AFTER_PROBE = failAfterProbe ? '1' : '0'
   process.env.FAKE_SUDO_DENY_WRAPPER = denyWrapper ? '1' : '0'
+  process.env.FAKE_SUDO_PRE_STDERR = preStderr
   return {
     dir: fakeDir,
     log,

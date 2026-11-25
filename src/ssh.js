@@ -366,7 +366,7 @@ export function keepTail(chunks, byteCount, chunk, cap) {
  * - `onClose` receives the collected streams and a `settle` handle
  *   (`resolve`/`reject`) so each caller maps the transport result its own way.
  */
-function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin, onTimeout, onClose, onStdout }) {
+function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin, onTimeout, onClose, onStdout, onStderr }) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       if (wipeStdin && Buffer.isBuffer(stdin)) stdin.fill(0)
@@ -428,6 +428,7 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wip
       outBytes = keepTail(outChunks, outBytes, kept, maxStdout)
     })
     child.stderr.on('data', (d) => {
+      onStderr?.(d)
       if (errHeadBytes < MAX_STDERR_HEAD) {
         const take = Math.min(d.length, MAX_STDERR_HEAD - errHeadBytes)
         errHeadChunks.push(d.subarray(0, take))
@@ -547,6 +548,7 @@ export async function sshRun(opts) {
     maxStdout = 4 * 1024 * 1024,
     maxStderr = 64 * 1024,
     wipeStdin = false,
+    onStderr,
   } = opts
   const MARK = `__REMOTE_SSH_EXIT_${randomUUID()}__`
   // Subshell, not brace group: an `exit` inside the command must not kill the
@@ -601,7 +603,7 @@ export async function sshRun(opts) {
   // resolve with timedOut:true (unless a complete marker already proved the
   // command finished).
   return runSshChild(spec, {
-    stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin, onStdout: scanMarker,
+    stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin, onStdout: scanMarker, onStderr,
     onClose: ({ transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, errTotal, settle }) => {
       if (settled) return
       // Decode once: a multi-byte character may straddle the outChunks/carry

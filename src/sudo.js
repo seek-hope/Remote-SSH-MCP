@@ -503,6 +503,33 @@ function stripMarks(stderr, marks) {
   return kept.join('\n')
 }
 
+/**
+ * Watch a byte stream for one standalone marker line without retaining it.
+ * A split marker is completed across chunks. The line buffer is bounded: a
+ * marker line is short, so an unterminated longer line cannot match it.
+ */
+function markerLineWatcher(mark, onMatch) {
+  let carry = Buffer.alloc(0)
+  let done = false
+  return (chunk) => {
+    if (done) return
+    const buf = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk
+    let start = 0
+    for (;;) {
+      const nl = buf.indexOf(0x0a, start)
+      if (nl === -1) break
+      if (buf.subarray(start, nl).toString('utf8').trim() === mark) {
+        done = true
+        onMatch()
+        return
+      }
+      start = nl + 1
+    }
+    carry = Buffer.from(buf.subarray(start))
+    if (carry.length > 4096) carry = Buffer.alloc(0)
+  }
+}
+
 /** Tail-cap stripped command output to its documented byte budget. */
 function capCommandOutput(text, cap) {
   const bytes = Buffer.from(text, 'utf8')
@@ -545,6 +572,11 @@ function makeMarks() {
  */
 async function executeSudo(target, { command, workdir, mode, password, timeoutMs, signal }) {
   const marks = makeMarks()
+  // START is printed before user code and can be evicted from both the retained
+  // stderr head and tail by large pre-START noise plus a command flood. Detect
+  // it while the stream arrives, using the same standalone-line rule.
+  let startSeen = false
+  const watchStart = markerLineWatcher(marks.start, () => { startSeen = true })
   // The caller's copy is no longer needed once the bytes for sudo are queued;
   // sshRun wipes the wire copy when its stdin finishes.
   const input = mode === 'password' ? Buffer.concat([password, Buffer.from('\n')]) : undefined
@@ -564,6 +596,7 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
       // after stripping it so a command's exact cap is not reduced.
       maxStdout: SUDO_MAX_STDOUT + SUDO_MARK_MARGIN,
       maxStderr: SUDO_MAX_STDERR + SUDO_MARK_MARGIN,
+      onStderr: watchStart,
     })
   } catch (error) {
     // sshRun clears the cache itself on a genuine ssh-255 host-key failure;
@@ -594,9 +627,9 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
     }
   }
   const detail = errorDetail(result.stderr, marks)
-  // The START/authentication markers are printed before the command; keep
-  // scanning a bounded head of stderr so a command that floods stderr is
-  // still recognized as having run.
+  // The START/authentication markers are printed before the command. Retained
+  // stderr is still scanned for the other markers, but START's authority comes
+  // from the stream watcher so a stderr flood cannot hide it.
   const seen = `${result.stderrHead ?? ''}\n${result.stderr ?? ''}`
   // Markers are printed as standalone lines. Substring matching would also
   // match sudo's denial message, which echoes the wrapper command line
@@ -607,7 +640,7 @@ async function executeSudo(target, { command, workdir, mode, password, timeoutMs
   // it printed itself (for example its own /proc/$$/cmdline, which contains
   // the cd/start tokens) must not turn a completed run into a false
   // cd/auth/ticket failure.
-  const ran = saw(marks.start)
+  const ran = startSeen || saw(marks.start)
   if (mode !== 'probe' && ran) {
     return {
       ok: true,
