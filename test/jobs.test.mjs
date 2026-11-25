@@ -478,3 +478,32 @@ test('the background tool does not leak PYTHONUTF8 into the command', { skip: pr
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('the background helper ignores PYTHONPATH module shadowing', { skip: process.platform !== 'linux' }, async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-job-shadow-'))
+  const shadow = join(dir, 'shadow')
+  await mkdir(shadow)
+  await writeFile(join(shadow, 'json.py'), 'raise RuntimeError("shadowed stdlib json")\n')
+  const previous = process.env.PYTHONPATH
+  process.env.PYTHONPATH = shadow
+  const target = { ssh: 'h', name: 'h', root: dir, controlPersist: 0 }
+  try {
+    const bash = makeBashTool(target)
+    const started = JSON.parse(await bash.execute({ command: 'true', run_in_background: true }, {}))
+    assert.ok(started.job_id)
+    let out
+    for (let i = 0; i < 100; i++) {
+      out = await remoteJob(target, { action: 'output', job_id: started.job_id, limit: 65536 }, new AbortController().signal)
+      if (out.status !== 'running') break
+      await delay(25)
+    }
+    assert.equal(out.status, 'completed')
+    assert.equal(out.exit_code, 0)
+  } finally {
+    if (previous === undefined) delete process.env.PYTHONPATH
+    else process.env.PYTHONPATH = previous
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

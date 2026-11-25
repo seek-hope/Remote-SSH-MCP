@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmod, readFile, readdir, stat, writeFile, symlink, lstat } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, stat, writeFile, symlink, lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { makeReadTool, makeWriteTool, makeEditTool } from '../src/tools/files.js'
 import { makeBashTool } from '../src/tools/bash.js'
@@ -276,5 +276,21 @@ test('write creates missing parents under a restrictive remote umask', async () 
     assert.equal((await stat(join(dir, 'a', 'b'))).mode & 0o777, 0o700)
   } finally {
     process.umask(previous)
+  }
+}))
+
+test('file helpers ignore PYTHONPATH module shadowing', async () => fixture(async ({ dir, write, read }) => {
+  const shadow = join(dir, 'shadow')
+  await mkdir(shadow)
+  await writeFile(join(shadow, 'json.py'), 'raise RuntimeError("shadowed stdlib json")\n')
+  const previous = process.env.PYTHONPATH
+  process.env.PYTHONPATH = shadow
+  try {
+    const target = join(dir, 'shadow-safe.txt')
+    await write.execute({ file_path: target, content: 'ok' }, {})
+    assert.match(await read.execute({ file_path: target }, {}), /ok/)
+  } finally {
+    if (previous === undefined) delete process.env.PYTHONPATH
+    else process.env.PYTHONPATH = previous
   }
 }))

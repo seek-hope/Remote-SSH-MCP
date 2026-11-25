@@ -573,3 +573,24 @@ test('glob uses UTF-8 filenames regardless of the remote locale', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('the glob helper ignores PYTHONPATH module shadowing', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-shadow-'))
+  const shadow = join(dir, 'shadow')
+  await mkdir(shadow)
+  await writeFile(join(shadow, 'json.py'), 'raise RuntimeError("shadowed stdlib json")\n')
+  const previous = process.env.PYTHONPATH
+  process.env.PYTHONPATH = shadow
+  try {
+    await writeFile(join(dir, 'ok.txt'), '')
+    const out = await makeGlobTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+      .execute({ pattern: '*.txt' }, exec)
+    assert.match(out, /ok\.txt/)
+  } finally {
+    if (previous === undefined) delete process.env.PYTHONPATH
+    else process.env.PYTHONPATH = previous
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
