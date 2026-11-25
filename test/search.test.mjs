@@ -273,7 +273,7 @@ test('glob bracket classes handle a literal ] and reject invalid ranges cleanly'
     for (const name of names) await writeFile(join(dir, name), '')
     await mkdir(join(dir, 'top', 'sub'), { recursive: true })
     await writeFile(join(dir, 'top', 'sub', 'x'), '')
-    for (const top of ['top0sub', 'top-sub']) {
+    for (const top of ['top0sub', 'top-sub', 'top.sub', 'topAsub', 'top:sub']) {
       await mkdir(join(dir, top), { recursive: true })
       await writeFile(join(dir, top, 'x'), '')
     }
@@ -297,14 +297,14 @@ test('glob bracket classes handle a literal ] and reject invalid ranges cleanly'
     assert.deepEqual(run('[\\^-z].txt'), at('^.txt', '_.txt', '`.txt', 'a.txt', 'b.txt', 'c.txt', 'y.txt', 'z.txt'))
     // Bracket classes never consume a path separator, including a non-negated
     // range whose interval contains '/'.
-    assert.deepEqual(run('top[!a]sub/x'), at('top0sub/x', 'top-sub/x'))
-    assert.deepEqual(run('top[!0]sub/x'), at('top-sub/x'))
+    assert.deepEqual(run('top[!a]sub/x'), at('top0sub/x', 'top-sub/x', 'top.sub/x', 'topAsub/x', 'top:sub/x'))
+    assert.deepEqual(run('top[!0]sub/x'), at('top-sub/x', 'top.sub/x', 'topAsub/x', 'top:sub/x'))
     assert.deepEqual(run('top[/]sub/x'), [])
-    assert.deepEqual(run('top[.-0]sub/x'), at('top0sub/x'))
+    assert.deepEqual(run('top[.-0]sub/x'), at('top0sub/x', 'top.sub/x'))
     // An interval with '/' as an endpoint is narrowed to the surviving part.
-    assert.deepEqual(run('top[/-a]sub/x'), at('top0sub/x'))
-    assert.deepEqual(run('top[!/-0]sub/x'), at('top-sub/x'))
-    assert.deepEqual(run('top[--/]sub/x'), at('top-sub/x'))
+    assert.deepEqual(run('top[/-a]sub/x'), at('top0sub/x', 'topAsub/x', 'top:sub/x'))
+    assert.deepEqual(run('top[!/-0]sub/x'), at('top-sub/x', 'top.sub/x', 'topAsub/x', 'top:sub/x'))
+    assert.deepEqual(run('top[--/]sub/x'), at('top-sub/x', 'top.sub/x'))
     let failure
     try {
       execFileSync('python3', ['-c', GLOB_PY, '[z-a]', dir, '100'], { encoding: 'utf8' })

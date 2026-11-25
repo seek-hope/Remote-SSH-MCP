@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveSshIdentity, sshRun, sshSpawn } from '../src/ssh.js'
+import { connectTimeoutMs, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
 import { parseTargets } from '../src/target.js'
 import { setCachedSudoPassword, sudoCacheKey, sudoCacheSize } from '../src/sudocache.js'
 import { installFakeSsh } from './helpers.mjs'
@@ -90,6 +90,34 @@ test('a command over the single-argument limit is rejected before spawning ssh',
   const nearBytes = Buffer.byteLength(near.args.at(-1))
   assert.ok(nearBytes > 96 * 1024 - 1024 && nearBytes <= 96 * 1024, `accepted just under the limit (${nearBytes})`)
   await assert.rejects(sshSpawn({ target: 'h', controlPersist: 0 }, 'x'.repeat(73_700)), /too large for one ssh argument/)
+})
+
+test('a successful command that prints a host-key phrase keeps the sudo cache', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_MARK = '0'
+  process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
+  setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+  try {
+    await sshExec({ target: 'h', command: 'true', controlPersist: 0 })
+    const result = await sshRun({ target: 'h', command: 'true', controlPersist: 0 })
+    assert.equal(result.code, 0)
+    assert.equal(sudoCacheSize(), 1, 'successful output is not a host-key failure')
+  } finally {
+    delete process.env.FAKE_SSH_MARK
+    delete process.env.FAKE_SSH_STDERR
+    await fake.cleanup()
+  }
+})
+
+test('the interactive connect timeout parses full numbers and falls back safely', () => {
+  assert.equal(connectTimeoutMs(''), 150_000)
+  assert.equal(connectTimeoutMs('0'), 150_000)
+  assert.equal(connectTimeoutMs('-1'), 150_000)
+  assert.equal(connectTimeoutMs('abc'), 150_000)
+  assert.equal(connectTimeoutMs('1e5'), 100_000)
+  assert.equal(connectTimeoutMs('999'), 1_000)
+  assert.equal(connectTimeoutMs('999999'), 150_000)
+  assert.equal(connectTimeoutMs('2000'), 2_000)
 })
 
 test('a host-key failure clears the destination sudo cache', async () => {

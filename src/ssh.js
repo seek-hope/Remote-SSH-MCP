@@ -403,8 +403,10 @@ export async function sshExec(opts) {
     onTimeout: () => new Error(`ssh timeout after ${timeoutMs}ms: ${command.slice(0, 120)}`),
     onClose: ({ transportCode, outChunks, errChunks, outTotal, settle }) => {
       const stderr = Buffer.concat(errChunks).toString('utf8')
-      clearSudoCacheOnHostKeyFailure(opts, stderr)
       if (transportCode !== 0) {
+        // Only a transport failure can be a host-key rejection; a successful
+        // command may legitimately print this phrase as its own output.
+        clearSudoCacheOnHostKeyFailure(opts, stderr)
         const tail = stderr.trim().split('\n').slice(-5).join('\n')
         return settle.reject(new Error(`remote command failed (exit ${transportCode}): ${tail || '(no stderr)'}`))
       }
@@ -455,12 +457,13 @@ export async function sshRun(opts) {
       let stdout = Buffer.concat(outChunks).toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
-      clearSudoCacheOnHostKeyFailure(opts, stderr)
       const truncated = { stdoutTruncated: outTotal > maxStdout, stderrTruncated: errTotal > maxStderr }
       if (timedOut) {
         return settle.resolve({ code: null, stdout, stderr, stderrHead, timedOut: true, ...truncated })
       }
       if (transportCode !== 0) {
+        // A successful run's stderr is not evidence of a host-key failure.
+        clearSudoCacheOnHostKeyFailure(opts, stderr)
         return settle.reject(new Error(`ssh transport failed (exit ${transportCode}): ${stderr.trim().split('\n').slice(-3).join('\n')}`))
       }
       const idx = stdout.lastIndexOf(MARK)
@@ -698,10 +701,7 @@ async function establishControlMaster(target, { interactive }) {
   }
 
   // Same interactive-auth budget as the manual connect action.
-  const waitMs = Math.min(
-    150_000,
-    Math.max(Number.parseInt(process.env.REMOTE_SSH_CONNECT_TIMEOUT_MS, 10) || 150_000, 1_000),
-  )
+  const waitMs = connectTimeoutMs()
   const wait = await waitForMaster(target, { timeoutMs: waitMs })
   if (!wait.ok) {
     return {
@@ -811,6 +811,17 @@ const LINUX_TERMINALS = [
   { name: 'wezterm', args: (cmd) => ['start', '--', 'bash', '-lc', cmd] },
   { name: 'foot', args: (cmd) => ['bash', '-lc', cmd] },
 ]
+
+/**
+ * Interactive authentication wait budget in milliseconds. A positive safe
+ * integer is clamped to 1000..150000; 0, negative, or non-numeric values use
+ * the 150000 default (README-documented).
+ */
+export function connectTimeoutMs(raw = process.env.REMOTE_SSH_CONNECT_TIMEOUT_MS) {
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0) return 150_000
+  return Math.min(150_000, Math.max(value, 1_000))
+}
 
 /**
  * Open a temporary terminal that runs an arbitrary shell command line; used

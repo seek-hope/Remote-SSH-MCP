@@ -620,6 +620,11 @@ test('update compares normalized destinations for the port override', async () =
     ;[target] = await readTargetStore(file)
     assert.equal(target.ssh, 'user@::1')
     assert.equal(target.port, 2200, 'an inline port replaces the stored override')
+
+    await manageTargets({ action: 'update', target: 'v6', ssh: 'user@[::1]:2300', port: null }, file)
+    ;[target] = await readTargetStore(file)
+    assert.equal(target.ssh, 'user@::1')
+    assert.equal(target.port, 2300, 'an inline port wins over port:null in the same update')
   } finally {
     await fake.cleanup()
     await rm(dir, { recursive: true, force: true })

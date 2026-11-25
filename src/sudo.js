@@ -165,7 +165,8 @@ async function promptForPassword(target, { promptTimeoutMs, signal }) {
     if (signal?.aborted) return abandoned
     const socketPath = join(dir, 'askpass.sock')
     const seconds = Math.max(1, Math.ceil(promptTimeoutMs / 1000))
-    const where = `${target.ssh}${target.port !== undefined ? `:${target.port}` : ''}`
+    // Avoid the ambiguous "user@::1:2222" form for bracketed IPv6 targets.
+    const where = target.port !== undefined ? `${target.ssh} (port ${target.port})` : target.ssh
     const who = promptText(target.name, 80)
     const prompt = `sudo password for ${who === where ? promptText(where, 120) : `${who} (${promptText(where, 120)})`}: `
 
