@@ -185,7 +185,8 @@ async function readOwnerRecord(lockPath) {
   let raw
   try {
     const info = await handle.stat()
-    if (!info.isFile()) return undefined // FIFO/device/directory/socket
+    // FIFO/device/directory/socket, or an implausibly large planted file.
+    if (!info.isFile() || info.size > 64 * 1024) return undefined
     raw = await handle.readFile('utf8')
   } catch (e) {
     if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO'].includes(e?.code)) return undefined

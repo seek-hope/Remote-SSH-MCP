@@ -746,3 +746,19 @@ test('a transient release read error is retried and the lock is removed', async 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('an oversized owner record is treated as an ownerless husk', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-huge-owner-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  try {
+    await mkdir(lock)
+    await writeFile(join(lock, 'owner'), 'x'.repeat(100_000))
+    const old = new Date(Date.now() - 60_000)
+    await utimes(lock, old, old)
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
