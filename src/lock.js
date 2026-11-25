@@ -36,8 +36,8 @@
  * writers ordered.
  */
 
-import { readFile, writeFile, rename, rm, mkdir, stat, readdir } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { open, writeFile, rename, rm, mkdir, stat, readdir } from 'node:fs/promises'
+import { constants as fsConstants, readFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -160,7 +160,8 @@ function ownerRecord(token) {
 }
 
 async function writeOwnerRecord(lockPath, token) {
-  await writeFile(ownerPathFor(lockPath), ownerRecord(token), 'utf8')
+  // Explicit owner-readable mode; umask cannot make it less readable.
+  await writeFile(ownerPathFor(lockPath), ownerRecord(token), { encoding: 'utf8', mode: 0o600 })
 }
 
 /**
@@ -170,14 +171,27 @@ async function writeOwnerRecord(lockPath, token) {
  * version).
  */
 async function readOwnerRecord(lockPath) {
+  const ownerPath = ownerPathFor(lockPath)
+  let handle
+  try {
+    // O_NONBLOCK avoids hanging on a FIFO planted at the owner path.
+    handle = await open(ownerPath, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0))
+  } catch (e) {
+    // Permanent shape/missing errors mean an ownerless husk; EACCES/EIO/EMFILE
+    // are UNKNOWN and callers must not treat the lock as dead.
+    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO'].includes(e?.code)) return undefined
+    throw e
+  }
   let raw
   try {
-    raw = await readFile(ownerPathFor(lockPath), 'utf8')
+    const info = await handle.stat()
+    if (!info.isFile()) return undefined // FIFO/device/directory/socket
+    raw = await handle.readFile('utf8')
   } catch (e) {
-    // Missing/not-a-directory is an absent record (a husk). Any other error
-    // (EACCES/EIO/EMFILE, ...) is UNKNOWN: callers must not treat it as dead.
-    if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') return undefined
+    if (['ENOENT', 'ENOTDIR', 'EISDIR', 'ELOOP', 'ENXIO'].includes(e?.code)) return undefined
     throw e
+  } finally {
+    await handle.close().catch(() => {})
   }
   try {
     const rec = JSON.parse(raw)
@@ -311,19 +325,17 @@ async function enterGate(gatePath, token) {
  */
 async function releaseGate(gatePath, token) {
   // Retry transient read/rm errors: a live-pid gate is never taken over.
-  let last
+  // Stay best-effort afterwards so recovery results are not masked.
   for (let i = 0; i < 5; i++) {
     try {
       const g = await readOwnerRecord(gatePath)
       if (g?.token !== token) return // gone or a successor's gate
       await rm(gatePath, { recursive: true, force: true })
       return
-    } catch (e) {
-      last = e
+    } catch {
       await sleep(20)
     }
   }
-  throw last
 }
 
 /**
@@ -465,19 +477,19 @@ async function releaseStoreLock(handle) {
   if (handle === undefined) return
   // Retry transient read/rm errors: leaving a live-pid lock behind would make
   // every later acquisition wait out its timeout (live owners are never stolen).
-  let last
+  // After the retries stay best-effort: a release failure must not mask the
+  // caller's committed result. A persistently unreadable owner needs manual
+  // removal of <store>.lock.
   for (let i = 0; i < 5; i++) {
     try {
       const rec = await readOwnerRecord(handle.lockPath)
       if (rec?.token !== handle.token) return // gone or a successor's lock
       await rm(handle.lockPath, { recursive: true, force: true })
       return
-    } catch (e) {
-      last = e
+    } catch {
       await sleep(20)
     }
   }
-  throw last
 }
 
 /**

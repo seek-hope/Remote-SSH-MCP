@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { connectTimeoutMs, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
 import { installLocalSsh } from './helpers.mjs'
 import { parseTargets } from '../src/target.js'
@@ -348,6 +351,25 @@ test('host-key phrases only clear the cache on ssh exit 255, not remote exits, t
   }
 })
 
+test('host-key detection survives U+FFFD expansion outside the head', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_EXIT = '255'
+  process.env.FAKE_SSH_MID_STDERR = '1'
+  try {
+    setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /host key verification failed/i)
+    assert.equal(sudoCacheSize(), 0, 'sshExec detects the phrase before the decoded re-cap')
+
+    setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+    await assert.rejects(sshRun({ target: 'h', command: 'true', controlPersist: 0 }), /host key verification failed/i)
+    assert.equal(sudoCacheSize(), 0, 'sshRun detects the phrase before the decoded re-cap')
+  } finally {
+    delete process.env.FAKE_SSH_EXIT
+    delete process.env.FAKE_SSH_MID_STDERR
+    await fake.cleanup()
+  }
+})
+
 test('a host-key phrase in the stderr head is found despite a stderr flood', async () => {
   const fake = await installFakeSsh()
   process.env.FAKE_SSH_HEAD_STDERR = 'Host key verification failed.\n'
@@ -365,10 +387,30 @@ test('a host-key phrase in the stderr head is found despite a stderr flood', asy
   }
 })
 
+test('a control directory may contain # and backslash', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'remote-ssh-control-chars-'))
+  const previous = process.env.REMOTE_SSH_CONTROL_DIR
+  const dir = join(base, 'a#b\\c')
+  process.env.REMOTE_SSH_CONTROL_DIR = dir
+  try {
+    const spec = await sshSpawn({ target: 'h', controlPersist: 43200 }, 'true')
+    assert.ok(spec.args.some((arg) => arg.includes(dir)))
+  } finally {
+    if (previous === undefined) delete process.env.REMOTE_SSH_CONTROL_DIR
+    else process.env.REMOTE_SSH_CONTROL_DIR = previous
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
 test('an unsafe control directory is rejected before spawning ssh', async () => {
   const previous = process.env.REMOTE_SSH_CONTROL_DIR
   process.env.REMOTE_SSH_CONTROL_DIR = '/tmp/remote ssh control'
   try {
+    await assert.rejects(
+      sshSpawn({ target: 'h', controlPersist: 43200 }, 'true'),
+      /REMOTE_SSH_CONTROL_DIR/,
+    )
+    process.env.REMOTE_SSH_CONTROL_DIR = '/tmp/${HOME}/control'
     await assert.rejects(
       sshSpawn({ target: 'h', controlPersist: 43200 }, 'true'),
       /REMOTE_SSH_CONTROL_DIR/,

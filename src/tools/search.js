@@ -334,7 +334,7 @@ export function makeGlobTool(target, cwd = target.root) {
         if (sentinel('too-complex')) throw new Error('glob: pattern is too complex (at most one **, four other * or ? wildcards, two { alternations; class literals do not count); simplify it or use grep')
         throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       }
-      if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
+      if (r.stdoutRawTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
       // Paths are NUL-delimited so filenames containing newlines stay intact;
       // the total marker is the text after the last NUL.
       const parts = r.stdout.split('\0')
@@ -391,7 +391,7 @@ export function makeGrepTool(target, cwd = target.root) {
       const r = await sshRun({ target: target.ssh, port: target.port, command: script, signal: exec.signal, controlPersist: target.controlPersist })
       if (r.timedOut) throw new Error(`grep: search timed out on ${target.name}`)
       if (r.code !== 0) throw new Error(`grep: search failed on ${target.name}: ${r.stderr.trim() || 'remote command did not complete'}`)
-      if (r.stdoutTruncated) throw new Error('grep: output exceeded the transport limit; narrow the pattern or path (very long matching lines)')
+      if (r.stdoutRawTruncated) throw new Error('grep: output exceeded the transport limit; narrow the pattern or path (very long matching lines)')
       const raw = r.stdout
       if (raw.startsWith('__REMOTE_SSH_ERR__:no-such-path')) throw new Error(`grep: no such path or not accessible on ${target.name}: ${root}`)
       if (raw.startsWith('__REMOTE_SSH_ERR__:not-regular')) throw new Error(`grep: not a regular file or directory on ${target.name}: ${root}`)

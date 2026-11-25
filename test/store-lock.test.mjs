@@ -17,7 +17,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile, stat, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -71,9 +71,10 @@ async function seedGate(file, record, { empty = false, ageMs = 0 } = {}) {
   return gatePath
 }
 
-/** Leftover lock/gate/trash artifacts in a store dir. */
+/** Leftover lock/gate/staging/trash artifacts in a store dir. */
 async function lockArtifacts(dir) {
-  return (await readdir(dir)).filter((n) => n.endsWith('.lock') || n.endsWith('.recover') || n.includes('.trash'))
+  return (await readdir(dir)).filter((n) => n.endsWith('.lock') || n.endsWith('.recover')
+    || n.includes('.staging.') || n.includes('.trash'))
 }
 
 /**
@@ -679,6 +680,7 @@ test('an unreadable live lock owner is never treated as stale', { skip: process.
     await mkdir(lock)
     await writeFile(owner, JSON.stringify({ token: 'live', pid: process.pid, at: new Date().toISOString() }))
     await chmod(owner, 0)
+    await assert.rejects(readFile(owner, 'utf8'), /EACCES/, 'the owner record is actually unreadable')
     const old = new Date(Date.now() - 60_000)
     await utimes(lock, old, old)
     await assert.rejects(
@@ -690,6 +692,57 @@ test('an unreadable live lock owner is never treated as stale', { skip: process.
     assert.equal(rec.token, 'live', 'the live owner was not moved aside')
   } finally {
     await chmod(owner, 0o644).catch(() => {})
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a directory at the owner path is recovered as an ownerless husk', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-dir-owner-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  try {
+    await mkdir(join(lock, 'owner'), { recursive: true })
+    const old = new Date(Date.now() - 60_000)
+    await utimes(lock, old, old)
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a FIFO at the owner path is recovered without blocking', { skip: process.platform !== 'linux' }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-fifo-owner-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  try {
+    await mkdir(lock)
+    spawnSync('mkfifo', [join(lock, 'owner')])
+    const old = new Date(Date.now() - 60_000)
+    await utimes(lock, old, old)
+    const started = Date.now()
+    const result = await withStoreLock(file, async () => 'ok', { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+    assert.ok(Date.now() - started < 2500)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a transient release read error is retried and the lock is removed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-release-retry-'))
+  const file = join(dir, 'targets.json')
+  const lock = `${file}.lock`
+  const owner = join(lock, 'owner')
+  try {
+    const result = await withStoreLock(file, async () => {
+      await chmod(owner, 0)
+      setTimeout(() => { chmod(owner, 0o644).catch(() => {}) }, 50)
+      return 'ok'
+    }, { timeoutMs: 3000, graceMs: 1000, retryMs: 10 })
+    assert.equal(result, 'ok')
+    await assert.rejects(stat(lock), /ENOENT/)
+  } finally {
     await rm(dir, { recursive: true, force: true })
   }
 })

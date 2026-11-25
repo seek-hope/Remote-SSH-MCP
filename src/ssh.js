@@ -24,8 +24,12 @@ const controlDir = () => {
   const dir = resolve(process.env.REMOTE_SSH_CONTROL_DIR || join(homedir(), '.cache', 'remote-ssh', 'control'))
   // OpenSSH reparses -o values: whitespace splits, quotes/backslashes change
   // parsing, # starts a comment, and % starts a token expansion.
-  if (/[\s"'\\#%]/.test(dir)) {
-    throw new Error('REMOTE_SSH_CONTROL_DIR must not contain whitespace, quotes, backslash, # or % (OpenSSH -o parsing)')
+  // Windows paths use backslashes and native OpenSSH is unsupported anyway.
+  // OpenSSH -o parsing splits whitespace, quotes change parsing, and
+  // $/{}/% trigger variable/token expansion. Mid-value # and backslash are
+  // accepted by OpenSSH and are allowed here.
+  if (process.platform !== 'win32' && /[\s"'$%{}]/.test(dir)) {
+    throw new Error('REMOTE_SSH_CONTROL_DIR must not contain whitespace, quotes, $, %, { or } (OpenSSH -o parsing/expansion)')
   }
   return dir
 }
@@ -204,9 +208,11 @@ function decodeTail(chunks, total, cap) {
   if (truncated) {
     while (buf.length > 0 && (buf[0] & 0xc0) === 0x80) buf = buf.subarray(1)
   }
-  let text = buf.toString('utf8')
+  const rawText = buf.toString('utf8')
+  let text = rawText
   // Invalid bytes decode to 3-byte U+FFFD; re-cap the decoded text so the
-  // returned string still respects the byte budget.
+  // returned string still respects the byte budget. rawText is retained for
+  // phrase detection (the re-cap can push a phrase out of the message).
   let bytes = Buffer.from(text, 'utf8')
   if (bytes.length > cap) {
     truncated = true
@@ -214,7 +220,7 @@ function decodeTail(chunks, total, cap) {
     while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1
     text = bytes.subarray(start).toString('utf8')
   }
-  return { text, truncated }
+  return { text, rawText, truncated }
 }
 
 /**
@@ -460,15 +466,16 @@ export async function sshExec(opts) {
       // A timeout/abort already settled the promise; the late close must not
       // clear the sudo cache based on whatever stderr was collected.
       if (timedOut || settled) return
-      const stderr = decodeTail(errChunks, errTotal, maxStderr).text
+      const stderrInfo = decodeTail(errChunks, errTotal, maxStderr)
+      const stderr = stderrInfo.text
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
       if (transportCode !== 0) {
         // Only ssh's own 255 is a client/transport failure. A remote command
         // may exit 1..254 (or print the phrase itself) without a host-key
         // problem. Scan the head as well as the tail so a stderr flood after
         // the host-key line does not hide it.
-        const hostKey = transportCode === 255 && HOST_KEY_RE.test(`${stderrHead}\n${stderr}`)
-        if (hostKey) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
+        const hostKey = transportCode === 255 && HOST_KEY_RE.test(`${stderrHead}\n${stderrInfo.rawText}`)
+        if (hostKey) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderrInfo.rawText}`)
         const tail = hostKey ? 'host key verification failed' : stderr.trim().split('\n').slice(-5).join('\n')
         return settle.reject(new Error(`remote command failed (exit ${transportCode}): ${tail || '(no stderr)'}`))
       }
@@ -495,7 +502,8 @@ export async function sshExec(opts) {
  * @param {object} opts same as sshExec, plus
  * @param {number} [opts.maxStderr] cap collected stderr bytes (tail kept), default 64 KiB
  * @returns {Promise<{ code: number|null, stdout: string, stderr: string,
- *   stderrHead: string, timedOut?: boolean, stdoutTruncated?: boolean,
+ *   stderrHead: string, timedOut?: boolean, stdoutRawTruncated?: boolean,
+ *   stdoutTruncated?: boolean, stderrRawTruncated?: boolean,
  *   stderrTruncated?: boolean }>}
  */
 export async function sshRun(opts) {
@@ -589,7 +597,9 @@ export async function sshRun(opts) {
       let commandOutput = capTail(stdout)
       if (markerCode !== undefined) commandOutput = commandOutput.replace(/\n$/, '')
       const truncated = {
+        stdoutRawTruncated: totalOutput > maxStdout,
         stdoutTruncated: totalOutput > maxStdout || stdoutBytes > maxStdout,
+        stderrRawTruncated: errTotal > maxStderr,
         stderrTruncated: errTotal > maxStderr || stderrInfo.truncated,
       }
       if (timedOut) {
@@ -603,8 +613,8 @@ export async function sshRun(opts) {
         // nonzero exit or its own stderr phrase is not a host-key problem. A
         // complete marker means the exit status came from the remote command.
         const hostKey = transportCode === 255 && markerCode === undefined
-          && HOST_KEY_RE.test(`${stderrHead}\n${stderr}`)
-        if (hostKey) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
+          && HOST_KEY_RE.test(`${stderrHead}\n${stderrInfo.rawText}`)
+        if (hostKey) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderrInfo.rawText}`)
         if (markerCode !== undefined) {
           // The wrapper already reported the command's exit; a late transport
           // failure must not turn a completed command into an error.

@@ -121,6 +121,12 @@ if (process.env.FAKE_SSH_MARK) {
   const marker = wrapped.match(/__REMOTE_SSH_EXIT_[0-9a-f-]+__/)?.[0] || '__REMOTE_SSH_EXIT__'
   fs.writeSync(1, marker + process.env.FAKE_SSH_MARK + '\\n')
 }
+if (process.env.FAKE_SSH_MID_STDERR) {
+  // 8 KiB filler swallows the phrase from the retained head; invalid bytes
+  // after it make the decoded text expand past the stderr cap.
+  fs.writeSync(2, Buffer.from('A'.repeat(8192) + ' Host key verification failed. '))
+  fs.writeSync(2, Buffer.alloc(42000, 0x80))
+}
 if (process.env.FAKE_SSH_HEAD_STDERR) fs.writeSync(2, process.env.FAKE_SSH_HEAD_STDERR)
 const bigErr = Number(process.env.FAKE_SSH_BIG_ERR || '0')
 if (bigErr > 0) {

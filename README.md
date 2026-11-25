@@ -286,7 +286,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 
 `job_kill` 使用相同的 `target` 与 `job_id`，向任务进程组发送 SIGTERM，并在 3 秒宽限期后由任务 worker 升级为 SIGKILL。升级由远端 worker 自己执行：即使 `job_kill` 的 SSH 请求在宽限期内断开或取消，终止仍会继续。命中范围是任务进程组以及同一会话内的成员，而不只是直接 shell；`set -m` 创建的新进程组、忽略 SIGTERM 的子进程也会被清理。worker 会等到组内非僵尸成员全部退出，并连续两次扫描确认为空后才完成，因此任务在仍有存活子进程时不会报告为已结束。若 worker 自身被暂停且无法运行，结果会保持 `running`；对 v3 worker，`killed` 表示 worker 接受终止并完成了收尾（确认成员已停止），若 worker 在收尾前死亡，状态为 `lost` 而不是 `killed`。主动创建新会话或守护进程的子进程仍可能脱离。输出仍可通过 `job_output` 读取；`job_kill` 的响应也包含第一块输出（offset 0，最多 65536 字节）。
 
-对 v3 worker，若其意外死亡（没有正常收尾标记），状态为 `lost`，即使退出文件已存在：`job_kill` 返回 `worker_missing: true`，不会向可能已被复用的 PID 发信号；`job_output` 的 `warning` 提示后代可能仍在运行，且其 `cleanup` 会被拒绝，需先在远端确认。v1/v2 旧任务沿用旧的 `completed`/`killed` 判定（有退出文件即 `completed`，可清理），但 `lost` 的清理在所有版本都会被拒绝。
+对 v3 worker，若其意外死亡（没有正常收尾标记），状态为 `lost`，即使退出文件已存在：`job_kill` 返回 `worker_missing: true`，不会向可能已被复用的 PID 发信号；`job_output` 的 `warning` 提示后代可能仍在运行，且其 `cleanup` 会被拒绝，需先在远端确认。v1/v2 旧任务沿用旧的 `completed`/`killed` 判定（有退出文件且无 killed 标记即 `completed`，可清理；有 killed 标记时 `killed` 优先），但 `lost` 的清理在所有版本都会被拒绝。
 
 任务状态与输出默认保存在远端 `~/.cache/remote-ssh/jobs/<job_id>/`。任务在 MCP 进程退出后继续运行，重启后凭相同目标与 ID 可继续查询。目标改名后需使用新名称；更改 SSH 主机后，旧任务仍保留在原主机。日志不会自动删除，也不限制磁盘占用；任务结束且当前读取块后没有更多输出时，可用 `job_output` 的 `cleanup: true` 永久删除任务记录及日志。服务不追踪此前的读取进度，调用方应先读取所有需要保留的内容。`status` 为 `completed` 仅表示进程已结束，成功与否需检查 `exit_code`。
 
@@ -297,7 +297,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 服务支持一个或多个 MCP 进程并发访问同一台或不同主机。每个 MCP 客户端应启动独立的 stdio 服务进程，不应共用同一条 stdin/stdout。每次调用独立指定 `target` 与工作目录，不存在全局“当前 target”；sudo 凭据缓存、连接预热状态与配置锁队列都是每个 MCP 进程独立的，多进程之间不会共享。
 
 - 在同一操作系统用户下，共用 `REMOTE_SSH_CONTROL_DIR` 的进程会按 OpenSSH 解析后的 ControlPath 协调连接准备；指向同一连接的不同别名共享已完成的认证。连接就绪后命令并行执行。认证失败后的 30 秒终端抑制缓存按目标别名 + 端口记录，因此同一连接的不同别名在该窗口内仍可能各自打开一次认证窗口。不同服务器独立认证。取消单次调用不会取消其他调用，也不会中断共享的连接准备。
-- 共用配置文件时，网络检查与用户输入不占用配置锁；保存时会短暂加锁并原子替换。若目标在验证期间被其他进程修改，更新会报告冲突而不覆盖新配置，此时应重新读取后重试。
+- 共用配置文件时，网络检查与用户输入不占用配置锁；保存时会短暂加锁并原子替换。若目标在验证期间被其他进程修改，更新会报告冲突而不覆盖新配置，此时应重新读取后重试。锁目录的 `owner` 文件被外部改成不可读时，存活持有者不会被强行抢占；若持有进程已退出而锁仍在，可手动删除 `<store>.lock` 与 `<store>.lock.recover`。
 - 后台任务使用独立 UUID。修改或删除目标配置不会影响已经开始的任务。
 
 并发访问不提供任意并发写入的保护：多个 `write` 同时覆盖同一文件时，最后一次写入生效；`edit` 的 mtime/size 校验只能尽力检测冲突，不能替代文件锁或内容合并。多个调用方编辑同一项目时，应划分文件或使用独立工作目录。`disconnect` 会关闭共享连接，可能中断其他调用方正在执行的操作；目标改名或删除、任务终止与日志清理同属共享管理操作，需要调用方自行协调。
@@ -309,7 +309,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | 变量 | 默认值 / 用途 |
 | --- | --- |
 | `REMOTE_SSH_TARGETS_FILE` | `~/.config/remote-ssh/targets.json`；`--targets` 优先 |
-| `REMOTE_SSH_CONTROL_DIR` | `~/.cache/remote-ssh/control`；目录权限 `0700`；路径不得包含空白、引号、反斜杠、`#` 或 `%`（OpenSSH `-o` 解析限制） |
+| `REMOTE_SSH_CONTROL_DIR` | `~/.cache/remote-ssh/control`；目录权限 `0700`；路径不得包含空白、引号、`$`、`%`、`{` 或 `}`（OpenSSH `-o` 解析/展开限制） |
 | `REMOTE_SSH_TERMINAL` | 终端启动命令；默认自动探测 |
 | `REMOTE_SSH_SUDO_CACHE_MS` | `1200000`（20 分钟）；sudo 密码在内存中的保留时间，`0` 关闭缓存；超过约 24.8 天时只有惰性清零 |
 | `REMOTE_SSH_CONNECT_TIMEOUT_MS` | `150000`；终端认证等待时间；正整数会夹取到 1000–150000 毫秒，非整数、`0`、负数或无效值回退到 `150000` |
@@ -319,7 +319,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | `REMOTE_SSH_LOCK_GRACE_MS` | `5000`；空锁被判定为过期前的宽限时间 |
 | `REMOTE_SSH_LOCK_RETRY_MS` | `50`；配置锁重试间隔 |
 
-SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径；该路径会作为 OpenSSH `-o ControlPath=` 的值重新解析，因此不能包含空白、引号、反斜杠、`#` 或 `%`。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`）。服务本身不转发环境变量；除非另行配置 ssh `SendEnv` 与 sshd `AcceptEnv`，在 MCP 进程环境中设置不会传到远端。
+SSH socket 路径过长时，可将 `REMOTE_SSH_CONTROL_DIR` 设置为较短的用户路径；该路径会作为 OpenSSH `-o ControlPath=` 的值重新解析，因此不能包含空白、引号、`$`、`%`、`{` 或 `}`。`REMOTE_SSH_JOB_DIR` 由远端 `jobs.py` 读取，必须在远端账户的非交互环境中设置（如 shell profile、`~/.ssh/environment` 或 sshd `PermitUserEnvironment`/`AcceptEnv`）。服务本身不转发环境变量；除非另行配置 ssh `SendEnv` 与 sshd `AcceptEnv`，在 MCP 进程环境中设置不会传到远端。
 
 ## 测试
 
