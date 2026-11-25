@@ -152,7 +152,7 @@ def signal_worker(state, sig):
 
 def main():
     request = json.load(sys.stdin)
-    job_id = request['job_id']
+    job_id = request['job_id'].lower()
     if not re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}', job_id):
         raise ValueError('Invalid job ID')
     os.umask(0o077)

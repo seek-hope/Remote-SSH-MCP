@@ -269,6 +269,18 @@ test('job_output requires a limit that can advance over a multi-byte character',
   }
 })
 
+test('an uppercase UUID addresses the same job', linux, async () => fixture(async ({ invoke, job_id, dir }) => {
+  assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'echo ok' })).status, 'started')
+  let out
+  for (let i = 0; i < 100; i++) {
+    out = await invoke({ action: 'output', job_id: job_id.toUpperCase(), limit: 65536 })
+    if (out.status !== 'running') break
+    await delay(25)
+  }
+  assert.equal(out.status, 'completed')
+  assert.match(out.output, /ok/)
+}))
+
 test('job_output keeps a partial trailing character pending for a lost job', linux, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-job-partial-'))
   const env = { ...process.env, REMOTE_SSH_JOB_DIR: join(dir, 'jobs') }

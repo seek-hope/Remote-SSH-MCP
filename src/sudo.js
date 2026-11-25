@@ -165,10 +165,7 @@ async function promptForPassword(target, { promptTimeoutMs, signal }) {
     if (signal?.aborted) return abandoned
     const socketPath = join(dir, 'askpass.sock')
     const seconds = Math.max(1, Math.ceil(promptTimeoutMs / 1000))
-    // Avoid the ambiguous "user@::1:2222" form for bracketed IPv6 targets.
-    const where = target.port !== undefined ? `${target.ssh} (port ${target.port})` : target.ssh
-    const who = promptText(target.name, 80)
-    const prompt = `sudo password for ${who === where ? promptText(where, 120) : `${who} (${promptText(where, 120)})`}: `
+    const prompt = sudoPasswordPrompt(target)
 
     const received = new Promise((resolve) => {
       let settled = false
@@ -383,6 +380,19 @@ async function obtainPassword(target, { ttlMs, promptTimeoutMs, identity, signal
     return { ok: false, error: `the cached sudo password for "${target.name}" was cleared or rejected before it could be used; retry the call` }
   }
   return { ok: true, password: stored.password, token: stored.token, source: 'prompt' }
+}
+
+/**
+ * Terminal prompt text: show the target name and the configured destination
+ * (with a separate port label so IPv6 is not ambiguous), avoiding a duplicate
+ * when the name defaults to the destination.
+ */
+export function sudoPasswordPrompt(target) {
+  const dest = target.port !== undefined ? `${target.ssh} (port ${target.port})` : target.ssh
+  const where = promptText(dest, 120)
+  return target.name === target.ssh
+    ? `sudo password for ${where}: `
+    : `sudo password for ${promptText(target.name, 80)} (${where}): `
 }
 
 /**

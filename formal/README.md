@@ -47,7 +47,7 @@ npm run verify
 
 结果是两个进程同时持锁，对目标配置做读改写就会丢失更新。触发条件是创建者在 `mkdir` 与写 owner 之间被停顿超过宽限期（默认 `graceMs = 5000`）。
 
-修复方式：获取锁改为私有 staging + 原子 `rename` 发布——先在 `lockPath.staging.<token>` 写完整 owner 记录，再 `rename` 到规范路径。协议不会发布空壳；规范路径要么不存在、要么带着完整 owner 记录。模型允许环境注入遗留空壳（仅在路径为空时），使替换/恢复动作可达；`Lock.tla` 验证 `NoOwnedHusk`（空壳永远没有 owner 记录）、`MutualExclusion`、`GateExclusion`、`TypeOK` 全部通过。`LockNoHusk.cfg` 额外反证 `NoHuskEver`（无空壳），证明空壳注入确实可达，避免 `NoOwnedHusk` 因注入被移除而空洞通过。模型把非空死锁/遗弃锁的恢复抽象为 `JudgeLock = stale` 后的 move-aside；普通文件或非空 husk 的具体清理由 `test/store-lock.test.mjs` 覆盖，不在 TLC 的 husk 注入路径内。
+修复方式：获取锁改为私有 staging + 原子 `rename` 发布——先在 `lockPath.staging.<token>` 写完整 owner 记录，再 `rename` 到规范路径。协议不会发布空壳；规范路径要么不存在、要么带着完整 owner 记录。模型允许环境注入遗留空壳（仅在路径为空时），使替换/恢复动作可达；`Lock.tla` 验证 `NoOwnedHusk`（空壳永远没有 owner 记录）、`MutualExclusion`、`GateExclusion`、`TypeOK` 全部通过。`LockNoHusk.cfg` 额外反证 `NoHuskEver`（无空壳），证明空壳注入确实可达，避免 `NoOwnedHusk` 因注入被移除而空洞通过。模型把非空死锁/遗弃锁的恢复抽象为 `JudgeLock = stale` 后的 move-aside；普通文件或非空 husk 的具体清理由 `test/store-lock.test.mjs` 覆盖，不在 TLC 的 husk 注入路径内。另有一个实现层的窄窗口不在模型内：`enterGate` 的第二次存活检查与 `rename` 之间，另一进程可能发布 gate；`recoverLock` 的 judge 与 rename 之间也可能插入新持锁者。该交错要求毫秒级时序且测试无法稳定复现，但属于已知的 TOCTOU 边界；不要把配置更新当作无需重试的强事务。
 
 闸门（`<store>.lock.recover`）此前也有同样的空壳窗口（`mkdir` 后再写 owner）。修复后同样改为 staging + `rename` 发布；`Lock.tla` 显式建模其发布、接管（`GateMoveAside` + `GatePublish`）、对存活闸门的退避与遗留 husk 替换（环境注入后 `GateReplaceHusk` 可达），`GateExclusion` 通过。
 

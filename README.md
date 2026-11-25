@@ -312,7 +312,7 @@ MCP 命令通道会关闭 `RemoteCommand`、TTY、`StdinNull` 与自动后台化
 | `REMOTE_SSH_CONTROL_DIR` | `~/.cache/remote-ssh/control`；目录权限 `0700` |
 | `REMOTE_SSH_TERMINAL` | 终端启动命令；默认自动探测 |
 | `REMOTE_SSH_SUDO_CACHE_MS` | `1200000`（20 分钟）；sudo 密码在内存中的保留时间，`0` 关闭缓存；超过约 24.8 天时只有惰性清零 |
-| `REMOTE_SSH_CONNECT_TIMEOUT_MS` | `150000`；终端认证等待时间，范围 1000–150000 毫秒；`0` 或无效值回退到 `150000` |
+| `REMOTE_SSH_CONNECT_TIMEOUT_MS` | `150000`；终端认证等待时间；正数会夹取到 1000–150000 毫秒，`0`、负数或无效值回退到 `150000` |
 | `REMOTE_SSH_SERVER_ALIVE_INTERVAL` | `30`；SSH 服务端保活间隔（秒），`0` 禁用，命令通道与终端认证共用 |
 | `REMOTE_SSH_SERVER_ALIVE_COUNT_MAX` | `3`；连续无响应次数达到后断开，最小 1 |
 | `REMOTE_SSH_LOCK_TIMEOUT_MS` | `150000`；等待配置锁的最长时间 |

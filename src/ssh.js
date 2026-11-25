@@ -353,7 +353,7 @@ function runSshChild(spec, { stdin, signal, timeoutMs, maxStdout, maxStderr, wip
     child.on('error', (e) => finish(reject, new Error(`ssh spawn failed: ${e.message}`)))
     child.on('close', (transportCode) => {
       onClose({
-        transportCode, timedOut, outChunks, errChunks, errHeadChunks, outTotal, errTotal, outBytes, errBytes,
+        transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, errTotal, outBytes, errBytes,
         settle: { resolve: (v) => finish(resolve, v), reject: (e) => finish(reject, e) },
       })
     })
@@ -401,12 +401,18 @@ export async function sshExec(opts) {
   return runSshChild(spec, {
     stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin,
     onTimeout: () => new Error(`ssh timeout after ${timeoutMs}ms: ${command.slice(0, 120)}`),
-    onClose: ({ transportCode, outChunks, errChunks, outTotal, settle }) => {
+    onClose: ({ transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, settle }) => {
+      // A timeout/abort already settled the promise; the late close must not
+      // clear the sudo cache based on whatever stderr was collected.
+      if (timedOut || settled) return
       const stderr = Buffer.concat(errChunks).toString('utf8')
+      const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
       if (transportCode !== 0) {
-        // Only a transport failure can be a host-key rejection; a successful
-        // command may legitimately print this phrase as its own output.
-        clearSudoCacheOnHostKeyFailure(opts, stderr)
+        // Only ssh's own 255 is a client/transport failure. A remote command
+        // may exit 1..254 (or print the phrase itself) without a host-key
+        // problem. Scan the head as well as the tail so a stderr flood after
+        // the host-key line does not hide it.
+        if (transportCode === 255) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
         const tail = stderr.trim().split('\n').slice(-5).join('\n')
         return settle.reject(new Error(`remote command failed (exit ${transportCode}): ${tail || '(no stderr)'}`))
       }
@@ -453,7 +459,8 @@ export async function sshRun(opts) {
   // resolve with timedOut:true (sshRun reports timeouts as data).
   return runSshChild(spec, {
     stdin, signal, timeoutMs, maxStdout, maxStderr, wipeStdin,
-    onClose: ({ transportCode, timedOut, outChunks, errChunks, errHeadChunks, outTotal, errTotal, settle }) => {
+    onClose: ({ transportCode, timedOut, settled, outChunks, errChunks, errHeadChunks, outTotal, errTotal, settle }) => {
+      if (settled) return
       let stdout = Buffer.concat(outChunks).toString('utf8')
       const stderr = Buffer.concat(errChunks).toString('utf8')
       const stderrHead = Buffer.concat(errHeadChunks).toString('utf8')
@@ -462,8 +469,9 @@ export async function sshRun(opts) {
         return settle.resolve({ code: null, stdout, stderr, stderrHead, timedOut: true, ...truncated })
       }
       if (transportCode !== 0) {
-        // A successful run's stderr is not evidence of a host-key failure.
-        clearSudoCacheOnHostKeyFailure(opts, stderr)
+        // Only ssh's own 255 is a client/transport failure; a remote command's
+        // nonzero exit or its own stderr phrase is not a host-key problem.
+        if (transportCode === 255) clearSudoCacheOnHostKeyFailure(opts, `${stderrHead}\n${stderr}`)
         return settle.reject(new Error(`ssh transport failed (exit ${transportCode}): ${stderr.trim().split('\n').slice(-3).join('\n')}`))
       }
       const idx = stdout.lastIndexOf(MARK)

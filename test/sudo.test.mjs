@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildSudoPromptScript, runSudoCommand } from '../src/sudo.js'
+import { buildSudoPromptScript, runSudoCommand, sudoPasswordPrompt } from '../src/sudo.js'
 import { makeSudoTool } from '../src/tools/sudo.js'
 import {
   clearAllSudoPasswords,
@@ -48,6 +48,15 @@ async function harness(options = {}) {
 }
 
 const run = (extra = {}) => runSudoCommand(target, { command: 'id -u', workdir: '/', timeoutMs: 10_000, ...extra })
+
+test('the sudo prompt deduplicates a default name and labels IPv6 ports unambiguously', () => {
+  assert.equal(sudoPasswordPrompt({ name: 'h', ssh: 'h' }), 'sudo password for h: ')
+  assert.equal(sudoPasswordPrompt({ name: 'h', ssh: 'h', port: 2222 }), 'sudo password for h (port 2222): ')
+  assert.equal(
+    sudoPasswordPrompt({ name: 'gpu', ssh: 'user@::1', port: 2222 }),
+    'sudo password for gpu (user@::1 (port 2222)): ',
+  )
+})
 
 test('the terminal prompt reads the password silently and delivers it over the private socket', () => {
   const script = buildSudoPromptScript({

@@ -109,6 +109,44 @@ test('a successful command that prints a host-key phrase keeps the sudo cache', 
   }
 })
 
+test('host-key phrases only clear the cache on ssh exit 255, not remote exits, timeouts, or aborts', async () => {
+  const fake = await installFakeSsh()
+  const seed = () => setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+  try {
+    process.env.FAKE_SSH_EXIT = '255'
+    process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
+    seed()
+    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /exit 255/)
+    assert.equal(sudoCacheSize(), 0, 'a genuine ssh 255 host-key failure clears')
+
+    process.env.FAKE_SSH_EXIT = '1'
+    seed()
+    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /exit 1/)
+    assert.equal(sudoCacheSize(), 1, 'a remote exit 1 is not an ssh client failure')
+
+    delete process.env.FAKE_SSH_EXIT
+    process.env.FAKE_SSH_HOLD_STDERR = '1'
+    process.env.FAKE_SSH_STDERR = 'Host key verification failed.\n'
+    seed()
+    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0, timeoutMs: 300 }), /timeout/)
+    assert.equal(sudoCacheSize(), 1, 'a timeout does not clear the cache')
+
+    seed()
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 100)
+    await assert.rejects(
+      sshExec({ target: 'h', command: 'true', controlPersist: 0, signal: controller.signal }),
+      /aborted/,
+    )
+    assert.equal(sudoCacheSize(), 1, 'an abort does not clear the cache')
+  } finally {
+    delete process.env.FAKE_SSH_EXIT
+    delete process.env.FAKE_SSH_STDERR
+    delete process.env.FAKE_SSH_HOLD_STDERR
+    await fake.cleanup()
+  }
+})
+
 test('the interactive connect timeout parses full numbers and falls back safely', () => {
   assert.equal(connectTimeoutMs(''), 150_000)
   assert.equal(connectTimeoutMs('0'), 150_000)
