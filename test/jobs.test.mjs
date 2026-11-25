@@ -399,3 +399,26 @@ test('a background command keeps the account umask', { skip: process.platform !=
     process.umask(previous)
   }
 })
+
+test('an extreme account umask still leaves a usable job record', { skip: process.platform !== 'linux' }, async () => {
+  await fixture(async ({ invoke, job_id, dir }) => {
+    const previous = process.umask(0o777)
+    try {
+      assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'touch created' })).status, 'started')
+    } finally {
+      process.umask(previous)
+    }
+    const jobDir = join(dir, 'jobs', job_id)
+    assert.equal((await stat(join(jobDir, 'state.json'))).mode & 0o777, 0o600)
+    assert.equal((await stat(join(jobDir, 'command.sh'))).mode & 0o777, 0o600)
+    let out
+    for (let i = 0; i < 100; i++) {
+      out = await invoke({ action: 'output', job_id, limit: 65536 })
+      if (out.status !== 'running') break
+      await delay(25)
+    }
+    assert.equal(out.status, 'completed')
+    assert.equal(out.exit_code, 0)
+    assert.equal((await stat(join(dir, 'created'))).mode & 0o777, 0)
+  })
+})

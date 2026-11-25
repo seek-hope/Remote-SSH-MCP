@@ -18,6 +18,7 @@ WORKER = r'''
 import json, os, signal, subprocess, sys, time
 from pathlib import Path
 job = Path(sys.argv[1])
+account_umask = int(sys.argv[2]) if len(sys.argv) > 2 else None
 request = json.loads((job / 'request.json').read_text(encoding='utf-8'))
 pid = os.getpid()
 stopping = None
@@ -74,7 +75,15 @@ try:
     else:
         command = job / 'command.sh'
         command.write_text(request['command'], encoding='utf-8')
-        child = subprocess.Popen(['bash', str(command)], cwd=request['workdir'], stdin=subprocess.DEVNULL)
+        if account_umask is None:
+            child = subprocess.Popen(['bash', str(command)], cwd=request['workdir'], stdin=subprocess.DEVNULL)
+        else:
+            # The worker keeps 077 for its own records; only the user command
+            # gets the account's umask, matching foreground bash.
+            child = subprocess.Popen(
+                ['bash', '-c', 'umask %03o; exec bash "$1"' % account_umask, 'bash', str(command)],
+                cwd=request['workdir'], stdin=subprocess.DEVNULL,
+            )
 except Exception as error:
     print(str(error), file=sys.stderr, flush=True)
     child = None
@@ -172,9 +181,12 @@ def main():
             (job / 'request.json').write_text(json.dumps(request), encoding='utf-8')
             # ponytail: logs remain on disk until explicit cleanup; add rotation if long jobs need a disk quota.
             with (job / 'out').open('wb') as output:
-                os.umask(previous_umask)
-                worker = subprocess.Popen([sys.executable, '-c', WORKER, str(job)], stdin=subprocess.DEVNULL,
-                                          stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                # Keep 077 for the worker's records; pass the account umask so
+                # only the user's command runs with it.
+                worker = subprocess.Popen(
+                    [sys.executable, '-c', WORKER, str(job), str(previous_umask)],
+                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+                )
             deadline = time.monotonic() + 10
             while not (job / 'state.json').exists():
                 if worker.poll() is not None or time.monotonic() >= deadline:
