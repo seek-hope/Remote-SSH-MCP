@@ -75,15 +75,14 @@ try:
     else:
         command = job / 'command.sh'
         command.write_text(request['command'], encoding='utf-8')
-        if account_umask is None:
-            child = subprocess.Popen(['bash', str(command)], cwd=request['workdir'], stdin=subprocess.DEVNULL)
-        else:
-            # The worker keeps 077 for its own records; only the user command
-            # gets the account's umask, matching foreground bash.
-            child = subprocess.Popen(
-                ['bash', '-c', 'umask %03o; exec bash "$1"' % account_umask, 'bash', str(command)],
-                cwd=request['workdir'], stdin=subprocess.DEVNULL,
-            )
+        # The worker keeps 077 for its own records; only the user command gets
+        # the account's umask. Popen(umask=) applies it before bash starts, so
+        # BASH_ENV is sourced exactly once (no extra wrapper shell).
+        kwargs = {}
+        if account_umask is not None:
+            kwargs['umask'] = account_umask
+        child = subprocess.Popen(['bash', str(command)], cwd=request['workdir'],
+                                 stdin=subprocess.DEVNULL, **kwargs)
 except Exception as error:
     print(str(error), file=sys.stderr, flush=True)
     child = None
@@ -164,9 +163,8 @@ def main():
     job_id = request['job_id'].lower()
     if not re.fullmatch(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}', job_id):
         raise ValueError('Invalid job ID')
-    # Keep job records private while the helper creates them, but restore the
-    # account's umask before starting the worker so the user's command behaves
-    # like a foreground command (the 0700 job directory still protects records).
+    # Keep 077 while the helper/worker create job records, and pass the
+    # inherited account umask to the worker so only the user command gets it.
     previous_umask = os.umask(0o077)
     root = Path(os.environ.get('REMOTE_SSH_JOB_DIR', str(Path.home() / '.cache' / 'remote-ssh' / 'jobs')))
     job = root / job_id
