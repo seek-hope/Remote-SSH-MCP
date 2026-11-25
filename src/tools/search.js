@@ -25,9 +25,9 @@ import heapq, os, re, stat, sys
 
 pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
-# Each **/ becomes an ambiguous optional prefix in the regex; many of them
-# cause exponential backtracking on a long non-matching path.
-if pattern.count('**') > 4:
+# Ambiguous wildcard groups cause exponential backtracking on long paths.
+# Keep a small, documented budget for all of them.
+if pattern.count('**') > 1 or pattern.count('*') + pattern.count('?') > 4 or pattern.count('{') > 2:
     sys.stderr.write('__REMOTE_SSH_ERR__:too-complex\n')
     sys.exit(2)
 
@@ -214,7 +214,7 @@ sys.stdout.buffer.flush()
 export function makeGlobTool(target, cwd = target.root) {
   return defTextTool({
     name: 'glob',
-    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in newest-modification-first order, up to ${GLOB_CAP} paths. Patterns may contain at most four ** segments. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/.svn/.hg/node_modules directories are skipped.`,
+    description: `Find files whose paths match a glob pattern. Returns matching file paths — never directories — in newest-modification-first order, up to ${GLOB_CAP} paths. Patterns may contain at most one ** segment, four * or ? wildcards, and two { alternations. The remote host must run Linux. REMOTE: the search runs on the selected host; .git/.svn/.hg/node_modules directories are skipped.`,
     parameters: {
       type: 'object',
       properties: {
@@ -238,7 +238,7 @@ export function makeGlobTool(target, cwd = target.root) {
         if (r.stderr.includes('__REMOTE_SSH_ERR__:not-a-dir')) throw new Error(`glob: not a directory on ${target.name}: ${root}`)
         if (r.stderr.includes('__REMOTE_SSH_ERR__:permission')) throw new Error(`glob: permission denied on ${target.name}: ${root}`)
         if (r.stderr.includes('__REMOTE_SSH_ERR__:bad-pattern')) throw new Error(`glob: invalid pattern: ${a.pattern}`)
-        if (r.stderr.includes('__REMOTE_SSH_ERR__:too-complex')) throw new Error('glob: pattern has too many ** segments (maximum 4); simplify it or use grep')
+        if (r.stderr.includes('__REMOTE_SSH_ERR__:too-complex')) throw new Error('glob: pattern is too complex (at most one **, four * or ? wildcards, two { alternations); simplify it or use grep')
         throw new Error(`glob: search failed on ${target.name}: ${r.stderr.trim() || r.stdout.slice(-120)}`)
       }
       if (r.stdoutTruncated) throw new Error('glob: output exceeded the transport limit; narrow the pattern or path')
@@ -257,7 +257,7 @@ export function makeGlobTool(target, cwd = target.root) {
         return `No files matched "${a.pattern}" under ${root} (remote host ${target.name}).`
       }
       const header = Number.isFinite(total) && total > paths.length
-        ? `Showing ${paths.length} of ${total} matches (newest representable paths; non-UTF-8 names are skipped).`
+        ? `Showing ${paths.length} of ${total} matches (newest first; non-UTF-8 names are not listed).`
         : `${paths.length} match${paths.length === 1 ? '' : 'es'}.`
       return `${header}\n${paths.join('\n')}`
     },

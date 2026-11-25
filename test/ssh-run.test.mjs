@@ -92,6 +92,38 @@ test('a complete exit marker wins over a descendant-held channel timeout', async
   }
 })
 
+test('a complete marker survives a descendant that floods stdout after it', async () => {
+  const ssh = await installLocalSsh()
+  try {
+    const result = await sshRun({
+      target: 'h',
+      command: '(sleep 0.1; yes B | head -c 5000000) & echo done',
+      controlPersist: 0,
+      timeoutMs: 500,
+    })
+    assert.equal(result.code, 0)
+    assert.notEqual(result.timedOut, true)
+    assert.equal(result.stdout, 'done', 'post-marker descendant output is discarded, not the marker')
+  } finally {
+    await ssh.cleanup()
+  }
+})
+
+test('a complete marker is honored even when ssh exits non-zero afterwards', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_MARK = '0'
+  process.env.FAKE_SSH_EXIT = '255'
+  try {
+    const result = await sshRun({ target: 'h', command: 'true', controlPersist: 0 })
+    assert.equal(result.code, 0)
+    assert.equal(result.timedOut, false)
+  } finally {
+    delete process.env.FAKE_SSH_MARK
+    delete process.env.FAKE_SSH_EXIT
+    await fake.cleanup()
+  }
+})
+
 test('wipeStdin wipes a large buffer even when the child never consumes it', async () => {
   const fake = await installFakeSsh()
   process.env.FAKE_SSH_MARK = '0'
@@ -100,6 +132,22 @@ test('wipeStdin wipes a large buffer even when the child never consumes it', asy
     const result = await sshRun({ target: 'h', command: 'true', stdin: secret, wipeStdin: true, timeoutMs: 5000 })
     assert.equal(result.code, 0)
     assert.equal(secret.every((byte) => byte === 0), true, 'the caller copy is wiped after an unconsumed/EPIPE stdin')
+
+    const aborted = Buffer.from('TOPSECRET')
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(
+      sshRun({ target: 'h', command: 'true', stdin: aborted, wipeStdin: true, signal: controller.signal, controlPersist: 0 }),
+      /aborted/,
+    )
+    assert.equal(aborted.every((byte) => byte === 0), true, 'an already-aborted call wipes the buffer')
+
+    const oversized = Buffer.from('TOPSECRET')
+    await assert.rejects(
+      sshRun({ target: 'h', command: 'x'.repeat(200000), stdin: oversized, wipeStdin: true, controlPersist: 0 }),
+      /too large/,
+    )
+    assert.equal(oversized.every((byte) => byte === 0), true, 'a spawn-time rejection wipes the buffer')
   } finally {
     delete process.env.FAKE_SSH_MARK
     await fake.cleanup()
@@ -148,8 +196,13 @@ test('host-key phrases only clear the cache on ssh exit 255, not remote exits, t
     assert.equal(sudoCacheSize(), 0, 'a genuine ssh 255 host-key failure clears')
 
     process.env.FAKE_SSH_EXIT = '1'
+    process.env.FAKE_SSH_STDERR = 'Host key verification failed.\nREAL_DETAIL\n'
     seed()
-    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), /exit 1/)
+    await assert.rejects(sshExec({ target: 'h', command: 'true', controlPersist: 0 }), (error) => {
+      assert.match(error.message, /exit 1/)
+      assert.match(error.message, /REAL_DETAIL/, 'a non-255 exit keeps its real remote detail')
+      return true
+    })
     assert.equal(sudoCacheSize(), 1, 'a remote exit 1 is not an ssh client failure')
 
     process.env.FAKE_SSH_EXIT = '255'

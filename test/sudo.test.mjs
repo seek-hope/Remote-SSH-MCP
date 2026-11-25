@@ -60,6 +60,7 @@ test('the sudo prompt deduplicates a default name and labels IPv6 ports unambigu
   assert.match(long, /\(port 2222\)/, 'the port survives a truncated destination')
   const split = sudoPasswordPrompt({ name: '😀'.repeat(39) + 'x' + '😀', ssh: 'h' })
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(split), 'no lone high surrogate at the cut')
+  assert.match(sudoPasswordPrompt({ name: 'a\u2028b', ssh: 'h' }), /a\?b/)
 })
 
 test('the terminal prompt reads the password silently and delivers it over the private socket', () => {

@@ -266,20 +266,39 @@ test('grep classifies non-regular and inaccessible roots without blocking', asyn
   }
 })
 
-test('glob rejects a pattern with too many ** segments', async () => {
+test('glob rejects patterns with too many ambiguous wildcards', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-complex-'))
   try {
-    let failure
-    try {
-      execFileSync('python3', ['-c', GLOB_PY, '**/'.repeat(5) + 'x', dir, '10'], { encoding: 'utf8' })
-    } catch (error) {
-      failure = error
+    for (const pattern of ['**/'.repeat(2) + 'x', '*a'.repeat(5) + 'b', '{*,*}'.repeat(3) + 'x']) {
+      let failure
+      try {
+        execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '10'], { encoding: 'utf8' })
+      } catch (error) {
+        failure = error
+      }
+      assert.ok(failure, pattern)
+      assert.match(String(failure.stderr), /__REMOTE_SSH_ERR__:too-complex/)
+      assert.doesNotMatch(String(failure.stderr), /Traceback/)
     }
-    assert.ok(failure)
-    assert.match(String(failure.stderr), /__REMOTE_SSH_ERR__:too-complex/)
-    assert.doesNotMatch(String(failure.stderr), /Traceback/)
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('glob cap header does not blame non-UTF-8 names for the item cap', async () => {
+  const fake = await installFakeSsh()
+  // The helper expands __NUL__; environment values cannot carry a raw NUL.
+  process.env.FAKE_SSH_STDOUT = Array.from({ length: 100 }, (_, i) => `/remote/f${i}__NUL__`).join('')
+    + '__REMOTE_SSH_TOTAL__350\n'
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    const out = await makeGlobTool(target, '/remote').execute({ pattern: '*.txt' }, exec)
+    assert.match(out, /^Showing 100 of 350 matches \(newest first; non-UTF-8 names are not listed\)\./)
+    assert.doesNotMatch(out, /non-UTF-8 names are skipped/)
+  } finally {
+    delete process.env.FAKE_SSH_STDOUT
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
   }
 })
 
