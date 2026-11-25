@@ -9,8 +9,17 @@ import { installFakeSsh } from './helpers.mjs'
 test('command and authentication sessions isolate interactive SSH settings but preserve the route and identity', async () => {
   const originalPath = process.env.PATH
   const fake = await installFakeSsh()
-  const config = join(fake.dir, 'config')
-  await writeFile(config, `Host *
+  const coreConfig = join(fake.dir, 'config')
+  const modernConfig = join(fake.dir, 'modern-config')
+  await writeFile(coreConfig, `Host *
+  HostName server.example.invalid
+  User configured-user
+  IdentityFile /test/configured-key
+  RequestTTY force
+  LocalForward 127.0.0.1:54321 127.0.0.1:22
+  ExitOnForwardFailure yes
+`)
+  await writeFile(modernConfig, `Host *
   HostName server.example.invalid
   User configured-user
   IdentityFile /test/configured-key
@@ -23,6 +32,13 @@ test('command and authentication sessions isolate interactive SSH settings but p
   LocalForward 127.0.0.1:54321 127.0.0.1:22
   ExitOnForwardFailure yes
 `)
+  // The documented minimum is OpenSSH 6.8, which does not understand these
+  // config keywords. Only assert them when the local ssh can parse them; the
+  // service's IgnoreUnknown list keeps passing those options on older clients.
+  const modernSupported = spawnSync('ssh', ['-G', '-F', modernConfig], {
+    encoding: 'utf8', env: { ...process.env, PATH: originalPath }, timeout: 5000,
+  }).status === 0
+  const config = modernSupported ? modernConfig : coreConfig
   try {
     await sshExec({ target: 'alias', port: 2200, controlPersist: 0, command: 'true' })
     process.env.FAKE_SSH_MARK = '0'
@@ -39,18 +55,24 @@ test('command and authentication sessions isolate interactive SSH settings but p
         encoding: 'utf8', env: { ...process.env, PATH: originalPath }, timeout: 5000,
       })
       assert.equal(native.status, 0, native.stderr)
-      for (const line of ['hostname server.example.invalid', 'user configured-user', 'port 2200',
-        'identityfile /test/configured-key', 'proxyjump configured-jump', 'requesttty false', 'clearallforwardings yes',
-        'serveraliveinterval 30', 'serveralivecountmax 3']) {
+      const expected = ['hostname server.example.invalid', 'user configured-user', 'port 2200',
+        'identityfile /test/configured-key', 'requesttty false', 'clearallforwardings yes',
+        'serveraliveinterval 30', 'serveralivecountmax 3']
+      if (modernSupported) expected.push('proxyjump configured-jump')
+      for (const line of expected) {
         // OpenSSH releases print RequestTTY=no as either "no" or "false".
         assert.ok(native.stdout.replace('requesttty no', 'requesttty false').includes(line), line)
       }
       assert.doesNotMatch(native.stdout, /^localforward /m)
       assert.doesNotMatch(native.stdout, /remotecommand echo interactive-login/)
       if (!args.includes('-f')) {
-        for (const line of ['sessiontype default', 'stdinnull no', 'forkafterauthentication no']) assert.ok(native.stdout.includes(line), line)
+        if (modernSupported) {
+          for (const line of ['sessiontype default', 'stdinnull no', 'forkafterauthentication no']) {
+            assert.ok(native.stdout.includes(line), line)
+          }
+        }
       } else {
-        assert.ok(native.stdout.includes('sessiontype none'))
+        if (modernSupported) assert.ok(native.stdout.includes('sessiontype none'))
         assert.ok(args.includes('BatchMode=no'))
         assert.ok(args.includes('StrictHostKeyChecking=ask'))
       }

@@ -41,6 +41,10 @@ def atomic_write(path, source, size, digest=None, expected=None):
     fd, tmp = tempfile.mkstemp(prefix='.remote-ssh-tmp-', dir=parent)
     try:
         with os.fdopen(fd, 'wb') as output:
+            if existing_mode is None:
+                # mkstemp's 0600 is masked by the process umask; an explicit
+                # fchmod makes the documented new-file mode independent of it.
+                os.fchmod(output.fileno(), 0o600)
             received = 0
             checksum = hashlib.sha256()
             while True:

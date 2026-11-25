@@ -12,6 +12,12 @@
 \*
 \* The gate is acquired with the same staging+rename publish as the lock, so
 \* the model includes its move-aside and publish steps explicitly.
+\*
+\* Legacy artifacts are modelled as environment injections: an ownerless husk
+\* may appear only where the canonical path is absent. This keeps the husk
+\* replacement/recovery actions reachable, and the checked property is that a
+\* husk never carries an owner record (the protocol itself never publishes a
+\* husk; only the environment creates one).
 
 EXTENDS Naturals, FiniteSets, TLC
 
@@ -66,8 +72,20 @@ AgeLock ==
 AgeGate ==
   /\ gatePresent /\ gateHusk /\ ~gateAged
   /\ gateAged' = TRUE
-  /\ UNCHANGED <<pc, alive, lockPresent, lockHusk, lockOwner,
+  /\ UNCHANGED <<pc, alive, lockPresent, lockHusk, lockOwner, lockAged,
                  gatePresent, gateHusk, gateOwner>>
+
+\* A legacy (pre-fix) artifact: an ownerless husk at a path that is currently
+\* absent. It cannot overwrite a live lock/gate.
+CreateLockHusk ==
+  /\ ~lockPresent
+  /\ lockPresent' = TRUE /\ lockHusk' = TRUE /\ lockOwner' = NoOne /\ lockAged' = FALSE
+  /\ UNCHANGED <<pc, alive, gatePresent, gateHusk, gateOwner, gateAged>>
+
+CreateGateHusk ==
+  /\ ~gatePresent
+  /\ gatePresent' = TRUE /\ gateHusk' = TRUE /\ gateOwner' = NoOne /\ gateAged' = FALSE
+  /\ UNCHANGED <<pc, alive, lockPresent, lockHusk, lockOwner, lockAged>>
 
 \* --------------------------- acquisition ---------------------------------
 
@@ -200,6 +218,8 @@ Next ==
   \/ \E p \in Procs: Crash(p)
   \/ AgeLock
   \/ AgeGate
+  \/ CreateLockHusk
+  \/ CreateGateHusk
   \/ \E p \in Procs:
        \/ Begin(p)
        \/ PublishAbsent(p) \/ PublishStaleHusk(p) \/ ContendOwned(p) \/ SkipHeldHusk(p)
@@ -232,9 +252,12 @@ MutualExclusion == Cardinality(HeldProcs) <= 1
 \* SAFETY: at most one process holds the recovery gate.
 GateExclusion == Cardinality({p \in Procs : pc[p] = "inGate"}) <= 1
 
-\* The fix's key structural property: the canonical lock path is never an
-\* ownerless husk, because a lock is only published once its owner record is
-\* already inside the staging directory.
-NoHusk == ~(lockPresent /\ lockHusk)
+\* The fix's key structural property: a husk (only ever a legacy artifact,
+\* injected by the environment) never carries an owner record. The protocol
+\* never publishes a husk, because a lock is only published once its owner
+\* record is already inside the staging directory.
+NoOwnedHusk ==
+  /\ (lockPresent /\ lockHusk) => lockOwner = NoOne
+  /\ (gatePresent /\ gateHusk) => gateOwner = NoOne
 
 =============================================================================

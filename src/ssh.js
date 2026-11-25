@@ -153,6 +153,16 @@ export function shq(s) {
 }
 
 /**
+ * A usable `ssh -G` answer needs complete, newline-terminated hostname, user
+ * and port lines. A partial write (for example a truncated port) must not be
+ * accepted as an identity: caching the password under it would make the next
+ * complete resolution miss and prompt again.
+ */
+function completeSshIdentity(out) {
+  return /^hostname .+\n/m.test(out) && /^user .+\n/m.test(out) && /^port .+\n/m.test(out)
+}
+
+/**
  * Resolve an SSH destination through `ssh -G` to a stable credential identity
  * (hostname, user, port). `undefined` means ssh -G is unavailable or the
  * output is unusable; callers then fall back to the configured alias key.
@@ -197,9 +207,9 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
       timer = setTimeout(() => {
         killTree()
         // A descendant may hold the pipes after a complete -G output; keep the
-        // identity instead of discarding it. Every field must be present:
-        // caching a hostname-only identity would later mismatch and re-prompt.
-        if (/^hostname /m.test(out) && /^user /m.test(out) && /^port /m.test(out)) {
+        // identity instead of discarding it. Every field must be complete and
+        // newline-terminated.
+        if (completeSshIdentity(out)) {
           finish(resolve, out)
           return
         }
@@ -222,6 +232,7 @@ export async function resolveSshIdentity(target, { timeoutMs = 5000 } = {}) {
         finish(code === 0 ? resolve : reject, code === 0 ? out : new Error(err.trim() || `ssh -G exited ${code}`))
       })
     })
+    if (!completeSshIdentity(stdout)) return undefined
     const pick = (name) => (stdout.match(new RegExp(`^${name} (.+)$`, 'm'))?.[1] ?? '').trim()
     const hostname = pick('hostname')
     if (!hostname) return undefined

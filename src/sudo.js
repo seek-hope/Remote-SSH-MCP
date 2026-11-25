@@ -307,8 +307,6 @@ function withPromptDeadline(promise, promptTimeoutMs) {
  */
 async function obtainPassword(target, { ttlMs, promptTimeoutMs, identity, signal }) {
   const key = sudoCacheKey(target)
-  const cached = getCachedSudoPasswordEntry(key, { identity })
-  if (cached !== undefined) return { ok: true, password: cached.password, token: cached.token, source: 'cache' }
 
   // With caching disabled there is nowhere to publish a shared result, so
   // each call prompts on its own. Its internal timer is sized by this caller's
@@ -333,7 +331,17 @@ async function obtainPassword(target, { ttlMs, promptTimeoutMs, identity, signal
     }
   }
 
-  let entry = pendingPrompts.get(key)
+  // A disabled cache must never satisfy a call, even if an entry from an
+  // earlier TTL setting is still present.
+  const cached = getCachedSudoPasswordEntry(key, { identity })
+  if (cached !== undefined) return { ok: true, password: cached.password, token: cached.token, source: 'cache' }
+
+  // Share a prompt only among callers with the same resolved identity: a
+  // caller whose `ssh -G` failed must not join (and then miss) a prompt whose
+  // credential is stored for another identity, and two identities must not
+  // overwrite each other's cache slot.
+  const promptKey = JSON.stringify([key, identity ?? null])
+  let entry = pendingPrompts.get(promptKey)
   if (entry === undefined) {
     const controller = new AbortController()
     const generation = sudoCacheGeneration(key)
@@ -349,9 +357,9 @@ async function obtainPassword(target, { ttlMs, promptTimeoutMs, identity, signal
       outcome.password.fill(0)
       return stored ? { ok: true } : { ok: false, error: 'the sudo password cache was cleared while the prompt was open' }
     })
-    pendingPrompts.set(key, entry)
+    pendingPrompts.set(promptKey, entry)
     entry.promise.finally(() => {
-      if (pendingPrompts.get(key) === entry) pendingPrompts.delete(key)
+      if (pendingPrompts.get(promptKey) === entry) pendingPrompts.delete(promptKey)
     }).catch(() => {})
   }
 
@@ -363,15 +371,15 @@ async function obtainPassword(target, { ttlMs, promptTimeoutMs, identity, signal
     entry.waiters -= 1
     // The last caller gave up: stop the prompt instead of leaving a socket
     // server and a Map entry alive until the terminal times out.
-    if (entry.waiters === 0 && pendingPrompts.get(key) === entry) {
-      pendingPrompts.delete(key)
+    if (entry.waiters === 0 && pendingPrompts.get(promptKey) === entry) {
+      pendingPrompts.delete(promptKey)
       entry.controller.abort()
     }
   }
   if (!outcome.ok) return outcome
   const stored = getCachedSudoPasswordEntry(key, { identity })
   if (stored === undefined) {
-    return { ok: false, error: `the cached sudo password for "${target.name}" was cleared before it could be used; retry the call` }
+    return { ok: false, error: `the cached sudo password for "${target.name}" was cleared or rejected before it could be used; retry the call` }
   }
   return { ok: true, password: stored.password, token: stored.token, source: 'prompt' }
 }

@@ -8,10 +8,13 @@
  * into a tool result, and never placed in process argv; every cached copy is
  * overwritten with zeros when it is replaced, cleared, or expired.
  *
- * Entries are keyed by the SSH destination and port the password was entered
- * for, and each entry is bound to the resolved host/user/port from `ssh -G`.
- * A password is therefore never offered to a different resolved destination;
- * removing a target, or changing its ssh/port, drops its credential.
+ * Entries are kept in one slot per SSH destination+port and resolved
+ * host/user/port from `ssh -G`. A password is therefore never offered to a
+ * different resolved destination, and concurrent prompts for different
+ * identities cannot overwrite or drop each other's credential. Removing a
+ * target, or changing its ssh/port, drops every slot of that destination;
+ * a changed identity simply stops matching its old slot, which expires on its
+ * own TTL.
  *
  * Set REMOTE_SSH_SUDO_CACHE_MS=0 to disable caching (a terminal is then opened
  * for every sudo call that does not have a remote sudo ticket).
@@ -21,7 +24,10 @@ const DEFAULT_TTL_MS = 20 * 60 * 1000
 /** Bound the number of destinations holding a secret at once. */
 const MAX_ENTRIES = 32
 
-/** key -> { password: Buffer, expiresAt: number, timer?: NodeJS.Timeout, id: number, identity?: string } */
+/**
+ * slot -> { password, expiresAt, timer?, id, destination, identity? }
+ * A slot is (destination key, resolved identity); see credentialSlot().
+ */
 const entries = new Map()
 /** Monotonic entry identity so a failure only drops the entry it used. */
 let nextEntryId = 1
@@ -67,13 +73,22 @@ export function sudoCacheTtlMs() {
 }
 
 /**
- * Credential identity of a target: the SSH destination string and port. Two
- * targets that name the same destination share one cached credential, which
- * is correct because they resolve to the same remote account.
+ * Destination key of a target: the SSH destination string and port. It scopes
+ * management clears; credentials themselves live in one slot per destination
+ * and resolved identity.
  * @param {{ ssh: string, port?: number }} target
  */
 export function sudoCacheKey(target) {
   return `${target.ssh}\u0000${target.port ?? ''}`
+}
+
+/**
+ * Unambiguous internal slot for one destination and one resolved identity.
+ * JSON encoding avoids collisions between destinations/identities that contain
+ * the separator characters themselves.
+ */
+function credentialSlot(key, identity) {
+  return JSON.stringify([key, identity ?? null])
 }
 
 /**
@@ -101,19 +116,19 @@ export function getCachedSudoPassword(key, now = Date.now()) {
 /**
  * Like getCachedSudoPassword, but also returns the entry token so a failed
  * authentication can drop exactly the entry it used (never a newer one that a
- * concurrent prompt just stored). Reuse requires the recorded identity to
- * equal the supplied one; in particular, an entry recorded with a resolved
- * identity is not reused when identity resolution now fails (both undefined
- * is allowed for environments without `ssh -G`).
+ * concurrent prompt just stored). The lookup is identity-scoped: a credential
+ * entered for a resolved host/user/port is never returned when the caller has
+ * a different identity, or none (for example when `ssh -G` failed now).
  * @param {string} key
  * @param {{ now?: number, identity?: string }} [options]
  * @returns {{ password: Buffer, token: number } | undefined}
  */
 export function getCachedSudoPasswordEntry(key, { now = Date.now(), identity } = {}) {
-  const entry = entries.get(key)
+  const slot = credentialSlot(key, identity)
+  const entry = entries.get(slot)
   if (entry === undefined) return undefined
-  if (entry.expiresAt <= now || entry.identity !== identity) {
-    dropEntry(key)
+  if (entry.expiresAt <= now) {
+    dropEntry(slot)
     return undefined
   }
   return { password: Buffer.from(entry.password), token: entry.id }
@@ -129,45 +144,48 @@ export function getCachedSudoPasswordEntry(key, { now = Date.now(), identity } =
  * @param {string} [expectedGeneration] token from sudoCacheGeneration; when
  *   supplied, the password is stored only if no explicit clear happened since
  * @param {string} [identity] resolved SSH host/user/port the password was
- *   entered for; entries with a different identity are never reused
+ *   entered for; this is part of the storage slot
  * @returns {boolean} whether the password was stored
  */
 export function setCachedSudoPassword(key, password, ttlMs = sudoCacheTtlMs(), now = Date.now(), expectedGeneration, identity) {
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) return false
   if (expectedGeneration !== undefined && expectedGeneration !== sudoCacheGeneration(key)) return false
-  dropEntry(key)
+  const slot = credentialSlot(key, identity)
+  dropEntry(slot)
   if (entries.size >= MAX_ENTRIES) {
     // Evict the entry closest to expiry; it is the least likely to be useful.
-    let oldestKey
+    let oldestSlot
     let oldestAt = Infinity
     for (const [candidate, entry] of entries) {
       if (entry.expiresAt < oldestAt) {
         oldestAt = entry.expiresAt
-        oldestKey = candidate
+        oldestSlot = candidate
       }
     }
-    dropEntry(oldestKey)
+    dropEntry(oldestSlot)
   }
   const expiresAt = now + ttlMs
-  const entry = { password: Buffer.from(password), expiresAt, id: nextEntryId++, identity }
+  const entry = { password: Buffer.from(password), expiresAt, id: nextEntryId++, destination: key, identity }
   if (ttlMs <= MAX_TIMER_MS) {
     // Wipe at the deadline even if no sudo call ever looks at the entry again.
     // The timer must not keep the process alive; a later access still checks
     // the deadline independently (lazy expiry remains the source of truth).
     entry.timer = setTimeout(() => {
-      const current = entries.get(key)
-      if (current?.expiresAt === expiresAt) dropEntry(key)
+      const current = entries.get(slot)
+      if (current?.expiresAt === expiresAt) dropEntry(slot)
     }, ttlMs)
     entry.timer.unref()
   }
-  entries.set(key, entry)
+  entries.set(slot, entry)
   return true
 }
 
-/** Drop one destination's credential and invalidate an open prompt's token. */
+/** Drop every credential slot of a destination and invalidate open prompts. */
 export function clearCachedSudoPassword(key) {
   generations.set(key, (generations.get(key) ?? 0) + 1)
-  dropEntry(key)
+  for (const [slot, entry] of entries) {
+    if (entry.destination === key) dropEntry(slot)
+  }
 }
 
 /**
@@ -176,22 +194,23 @@ export function clearCachedSudoPassword(key) {
  * When `token` is supplied, drop only that exact entry.
  */
 export function dropCachedSudoPassword(key, token) {
-  const entry = entries.get(key)
-  if (entry === undefined) return
-  if (token !== undefined && entry.id !== token) return
-  dropEntry(key)
+  for (const [slot, entry] of entries) {
+    if (entry.destination !== key) continue
+    if (token !== undefined && entry.id !== token) continue
+    dropEntry(slot)
+  }
 }
 
 /** Drop every credential; used on shutdown and by tests. */
 export function clearAllSudoPasswords() {
   resetEpoch += 1
-  for (const key of entries.keys()) dropEntry(key)
+  for (const slot of entries.keys()) dropEntry(slot)
   // Old generation tokens carry the old epoch; clearing the map is safe and
   // keeps it from growing across many short-lived destinations.
   generations.clear()
 }
 
-/** Number of destinations currently holding a credential (tests/diagnostics). */
+/** Number of cached credentials, one per destination and resolved identity. */
 export function sudoCacheSize() {
   return entries.size
 }

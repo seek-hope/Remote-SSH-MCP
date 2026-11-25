@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { chmod, mkdtemp, mkdir, writeFile, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -206,27 +206,83 @@ test('glob reports missing, non-directory, and unreadable paths distinctly', asy
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-err-'))
   const locked = join(dir, 'locked')
   const unreadable = join(dir, 'unreadable')
+  const nonRoot = typeof process.getuid === 'function' ? process.getuid() !== 0 : true
   try {
     const glob = () => makeGlobTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
     await assert.rejects(glob().execute({ pattern: '*.txt', path: join(dir, 'missing') }, exec), /no such directory/)
     await writeFile(join(dir, 'file.txt'), '')
     await assert.rejects(glob().execute({ pattern: '*.txt', path: join(dir, 'file.txt') }, exec), /not a directory/)
-    await mkdir(locked)
-    await chmod(locked, 0)
-    await assert.rejects(glob().execute({ pattern: '*.txt' }, exec), (error) => {
-      assert.match(error.message, /Permission denied/)
-      assert.doesNotMatch(error.message, /Traceback/)
-      return true
-    })
-    // A root reachable only through an unsearchable parent is a permission
-    // error, not "no such directory".
-    await mkdir(join(unreadable, 'inner'), { recursive: true })
-    await chmod(unreadable, 0)
-    await assert.rejects(glob().execute({ pattern: '*.txt', path: join(unreadable, 'inner') }, exec), /permission denied/)
+    // An intermediate component that is a file is a non-directory root.
+    await assert.rejects(glob().execute({ pattern: '*.txt', path: join(join(dir, 'file.txt'), 'x') }, exec), /not a directory/)
+    if (nonRoot) {
+      await mkdir(locked)
+      await chmod(locked, 0)
+      await assert.rejects(glob().execute({ pattern: '*.txt' }, exec), (error) => {
+        assert.match(error.message, /Permission denied/)
+        assert.doesNotMatch(error.message, /Traceback/)
+        return true
+      })
+      // A root reachable only through an unsearchable parent is a permission
+      // error, not "no such directory".
+      await mkdir(join(unreadable, 'inner'), { recursive: true })
+      await chmod(unreadable, 0)
+      await assert.rejects(glob().execute({ pattern: '*.txt', path: join(unreadable, 'inner') }, exec), /permission denied/)
+    }
   } finally {
     await chmod(locked, 0o755).catch(() => {})
     await chmod(unreadable, 0o755).catch(() => {})
     await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('grep classifies non-regular and inaccessible roots without blocking', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-root-'))
+  const fifo = join(dir, 'pipe')
+  const locked = join(dir, 'locked')
+  spawnSync('mkfifo', [fifo])
+  const nonRoot = typeof process.getuid === 'function' ? process.getuid() !== 0 : true
+  try {
+    const grep = () => makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+    const started = Date.now()
+    await assert.rejects(grep().execute({ pattern: 'hit', path: fifo }, exec), /not a regular file or directory/)
+    assert.ok(Date.now() - started < 3000, 'a FIFO root is rejected instead of blocking until the SSH timeout')
+    await assert.rejects(grep().execute({ pattern: 'hit', path: join(dir, 'missing') }, exec), /no such path or not accessible/)
+    if (nonRoot) {
+      await mkdir(join(locked, 'inner'), { recursive: true })
+      await chmod(locked, 0)
+      await assert.rejects(grep().execute({ pattern: 'hit', path: join(locked, 'inner') }, exec), /not accessible/)
+    }
+  } finally {
+    await chmod(locked, 0o755).catch(() => {})
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('glob bracket classes handle a literal ] and reject invalid ranges cleanly', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-class-'))
+  try {
+    await writeFile(join(dir, '].txt'), '')
+    await writeFile(join(dir, 'a.txt'), '')
+    const run = (pattern) => {
+      const parts = execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '100'], { encoding: 'utf8' }).split('\0')
+      parts.pop()
+      return parts.filter(Boolean).sort()
+    }
+    assert.deepEqual(run('[]].txt'), [join(dir, '].txt')])
+    assert.deepEqual(run('[!]].txt'), [join(dir, 'a.txt')])
+    let failure
+    try {
+      execFileSync('python3', ['-c', GLOB_PY, '[z-a]', dir, '100'], { encoding: 'utf8' })
+    } catch (error) {
+      failure = error
+    }
+    assert.ok(failure, 'an invalid range must fail')
+    assert.match(String(failure.stderr), /__REMOTE_SSH_ERR__:bad-pattern/)
+    assert.doesNotMatch(String(failure.stderr), /Traceback/)
+  } finally {
     await rm(dir, { recursive: true, force: true })
   }
 })
@@ -246,6 +302,21 @@ test('grep at exactly the match cap reports no truncation', async () => {
   }
 })
 
+test('grep at one over the match cap reports truncation', async () => {
+  const ssh = await installLocalSsh()
+  const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-over-'))
+  try {
+    await writeFile(join(dir, 'many.txt'), 'hit\n'.repeat(251))
+    const out = await makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
+      .execute({ pattern: 'hit' }, exec)
+    assert.match(out, /truncated at 250 matches/)
+    assert.equal(out.split('\n').filter(line => /^\d+:hit$/.test(line)).length, 250)
+  } finally {
+    await ssh.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('grep caps encoded output at 512 KiB', async () => {
   const ssh = await installLocalSsh()
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-grep-bytes-'))
@@ -255,7 +326,11 @@ test('grep caps encoded output at 512 KiB', async () => {
     const out = await makeGrepTool({ ssh: 'h', name: 'h', controlPersist: 0 }, dir)
       .execute({ pattern: 'hit' }, exec)
     assert.match(out, /\[output truncated at 512 KiB/)
-    assert.ok(Buffer.byteLength(out) <= 600 * 1024, `bounded output (${Buffer.byteLength(out)} bytes)`)
+    const bytes = Buffer.byteLength(out)
+    assert.ok(bytes <= 600 * 1024, `bounded output (${bytes} bytes)`)
+    assert.ok(bytes >= 480 * 1024, `the cap is not silently tiny (${bytes} bytes)`)
+    const matches = out.split('\n').filter(line => /^\d+:x/.test(line)).length
+    assert.ok(matches >= 60, `complete records are kept (${matches})`)
   } finally {
     await ssh.cleanup()
     await rm(dir, { recursive: true, force: true })

@@ -46,9 +46,9 @@ npm run verify
 
 结果是两个进程同时持锁，对目标配置做读改写就会丢失更新。触发条件是创建者在 `mkdir` 与写 owner 之间被停顿超过宽限期（默认 `graceMs = 5000`）。
 
-修复方式：获取锁改为私有 staging + 原子 `rename` 发布——先在 `lockPath.staging.<token>` 写完整 owner 记录，再 `rename` 到规范路径。规范路径要么不存在、要么带着完整 owner 记录，不再有空壳窗口。`Lock.tla` 对修复后协议验证 `NoHusk`、`MutualExclusion`、`GateExclusion`、`TypeOK` 全部通过。
+修复方式：获取锁改为私有 staging + 原子 `rename` 发布——先在 `lockPath.staging.<token>` 写完整 owner 记录，再 `rename` 到规范路径。协议不会发布空壳；规范路径要么不存在、要么带着完整 owner 记录。模型允许环境注入遗留空壳（仅在路径为空时），使替换/恢复动作可达；`Lock.tla` 验证 `NoOwnedHusk`（空壳永远没有 owner 记录）、`MutualExclusion`、`GateExclusion`、`TypeOK` 全部通过。
 
-闸门（`<store>.lock.recover`）此前也有同样的空壳窗口（`mkdir` 后再写 owner）。修复后同样改为 staging + `rename` 发布；`Lock.tla` 显式建模其发布、接管（`GateMoveAside` + `GatePublish`）、对存活闸门的退避与 husk 替换，`GateExclusion` 通过。
+闸门（`<store>.lock.recover`）此前也有同样的空壳窗口（`mkdir` 后再写 owner）。修复后同样改为 staging + `rename` 发布；`Lock.tla` 显式建模其发布、接管（`GateMoveAside` + `GatePublish`）、对存活闸门的退避与遗留 husk 替换（环境注入后 `GateReplaceHusk` 可达），`GateExclusion` 通过。
 
 ## 连接预热去重
 

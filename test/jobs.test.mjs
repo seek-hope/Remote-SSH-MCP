@@ -339,15 +339,19 @@ test('an undecodable /proc comm does not break job bookkeeping', linux, async ()
     // Guard against a vacuous test: the helper must really expose a comm that
     // strict UTF-8 decoding rejects, or members()/alive() never see it.
     let undecodable = false
-    for (let i = 0; i < 100 && !undecodable; i++) {
+    for (let i = 0; i < 100 && !undecodable && bad.exitCode === null; i++) {
       try {
         new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(`/proc/${bad.pid}/stat`))
         await delay(10)
-      } catch {
+      } catch (error) {
+        // Only an actual UTF-8 decode failure counts; a missing/unreadable
+        // proc file must not satisfy the guard.
+        if (!(error instanceof TypeError)) throw error
         undecodable = true
       }
     }
     assert.equal(undecodable, true, 'the helper must expose an undecodable comm')
+    assert.equal(bad.exitCode, null, 'the helper is still alive')
     await fixture(async ({ invoke, job_id, dir }) => {
       assert.equal((await invoke({ action: 'start', job_id, workdir: dir, command: 'sleep 0.2; echo ok' })).status, 'started')
       let out

@@ -85,6 +85,11 @@ test('a command over the single-argument limit is rejected before spawning ssh',
   )
   const spec = await sshSpawn({ target: 'h', controlPersist: 0 }, 'x'.repeat(60_000))
   assert.ok(Buffer.byteLength(spec.args.at(-1)) <= 96 * 1024)
+  // Straddle the 96 KiB limit instead of only testing a far-below value.
+  const near = await sshSpawn({ target: 'h', controlPersist: 0 }, 'x'.repeat(73_000))
+  const nearBytes = Buffer.byteLength(near.args.at(-1))
+  assert.ok(nearBytes > 96 * 1024 - 1024 && nearBytes <= 96 * 1024, `accepted just under the limit (${nearBytes})`)
+  await assert.rejects(sshSpawn({ target: 'h', controlPersist: 0 }, 'x'.repeat(73_700)), /too large for one ssh argument/)
 })
 
 test('a host-key failure clears the destination sudo cache', async () => {
@@ -142,7 +147,8 @@ test('resolveSshIdentity keeps a complete -G answer held open by a descendant', 
     delete process.env.FAKE_SSH_G_MODE
     await fake.cleanup()
   }
-  assert.ok(Date.now() - started >= 250, `the timeout path ran (${Date.now() - started}ms)`)
+  const elapsed = Date.now() - started
+  assert.ok(elapsed >= 250 && elapsed < 1000, `the 300ms timeout path ran (${elapsed}ms)`)
 })
 
 test('resolveSshIdentity rejects a partial -G answer on timeout', async () => {
@@ -155,5 +161,31 @@ test('resolveSshIdentity rejects a partial -G answer on timeout', async () => {
     delete process.env.FAKE_SSH_G_MODE
     await fake.cleanup()
   }
-  assert.ok(Date.now() - started >= 250, `the timeout path ran (${Date.now() - started}ms)`)
+  const elapsed = Date.now() - started
+  assert.ok(elapsed >= 250 && elapsed < 1000, `the 300ms timeout path ran (${elapsed}ms)`)
+})
+
+test('resolveSshIdentity rejects a truncated final -G line on timeout', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_G_MODE = 'truncated'
+  const started = Date.now()
+  try {
+    assert.equal(await resolveSshIdentity({ ssh: 'h' }, { timeoutMs: 300 }), undefined)
+  } finally {
+    delete process.env.FAKE_SSH_G_MODE
+    await fake.cleanup()
+  }
+  const elapsed = Date.now() - started
+  assert.ok(elapsed >= 250 && elapsed < 1000, `the 300ms timeout path ran (${elapsed}ms)`)
+})
+
+test('resolveSshIdentity rejects an answer without a user line on timeout', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_G_MODE = 'nouser'
+  try {
+    assert.equal(await resolveSshIdentity({ ssh: 'h' }, { timeoutMs: 300 }), undefined)
+  } finally {
+    delete process.env.FAKE_SSH_G_MODE
+    await fake.cleanup()
+  }
 })

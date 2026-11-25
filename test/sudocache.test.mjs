@@ -95,7 +95,7 @@ test('entries are bound to the resolved SSH identity and their own token', () =>
   const entry = getCachedSudoPasswordEntry(key, { now: 1500, identity: 'host\u0000user\u000022' })
   assert.equal(entry?.password.toString(), 'x')
   assert.equal(getCachedSudoPasswordEntry(key, { now: 1500, identity: 'host\u0000other\u000022' }), undefined)
-  assert.equal(sudoCacheSize(), 0, 'an identity mismatch drops the entry')
+  assert.equal(sudoCacheSize(), 1, 'another identity cannot read the slot, and does not drop it')
 
   setCachedSudoPassword(key, Buffer.from('x'), 1000, 1000, undefined, 'h\u0000u\u000022')
   const first = getCachedSudoPasswordEntry(key, { now: 1500, identity: 'h\u0000u\u000022' })
@@ -110,11 +110,22 @@ test('an identity-bound entry is not reused when identity resolution fails', () 
   clearAllSudoPasswords()
   setCachedSudoPassword(key, Buffer.from('x'), 1000, 1000, undefined, 'host\u0000user\u000022')
   assert.equal(getCachedSudoPasswordEntry(key, { now: 1500 }), undefined,
-    'an unverifiable credential is dropped instead of used')
-  assert.equal(sudoCacheSize(), 0)
+    'an unverifiable credential is not used')
+  assert.equal(sudoCacheSize(), 1, 'the verified identity slot remains valid')
 
   // Without ssh -G on either call the alias key is all the binding available.
   setCachedSudoPassword(key, Buffer.from('y'), 1000, 1000)
   assert.equal(getCachedSudoPasswordEntry(key, { now: 1500 })?.password.toString(), 'y')
   clearAllSudoPasswords()
+})
+
+test('different resolved identities use separate slots and do not drop each other', () => {
+  clearAllSudoPasswords()
+  setCachedSudoPassword(key, Buffer.from('a'), 1000, 1000, undefined, 'host-a\u0000u\u000022')
+  setCachedSudoPassword(key, Buffer.from('b'), 1000, 1000, undefined, 'host-b\u0000u\u000022')
+  assert.equal(sudoCacheSize(), 2)
+  assert.equal(getCachedSudoPasswordEntry(key, { now: 1500, identity: 'host-a\u0000u\u000022' })?.password.toString(), 'a')
+  assert.equal(getCachedSudoPasswordEntry(key, { now: 1500, identity: 'host-b\u0000u\u000022' })?.password.toString(), 'b')
+  clearCachedSudoPassword(key)
+  assert.equal(sudoCacheSize(), 0, 'a destination clear drops every identity slot')
 })

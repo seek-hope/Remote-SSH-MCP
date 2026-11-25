@@ -34,10 +34,12 @@ def members():
             continue
         try:
             info = Path(entry.path, 'stat').read_text(errors='surrogateescape').rsplit(')', 1)[1].split()
-        except (OSError, UnicodeError):
+            if len(info) < 4:
+                continue
+            if info[0] != 'Z' and (int(info[2]) == pid or int(info[3]) == pid):
+                yield int(entry.name)
+        except (OSError, UnicodeError, IndexError, ValueError):
             continue
-        if info[0] != 'Z' and (int(info[2]) == pid or int(info[3]) == pid):
-            yield int(entry.name)
 
 def signal_members(sig):
     for member in members():
@@ -117,8 +119,10 @@ while True:
 def alive(state):
     try:
         stat = Path('/proc/%s/stat' % state['pid']).read_text(errors='surrogateescape').rsplit(')', 1)[1].split()
+        if len(stat) < 20:
+            return False
         return stat[0] != 'Z' and stat[19] == state['stamp']
-    except (OSError, UnicodeError):
+    except (OSError, UnicodeError, IndexError, ValueError):
         return False
 
 

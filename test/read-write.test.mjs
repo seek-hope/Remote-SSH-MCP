@@ -70,6 +70,10 @@ test('read handles chunk boundaries and rejects an oversized individual line', a
   const out = await read.execute({ file_path: file, offset: 2, limit: 1 }, {})
   assert.match(out, /2\t中文/)
   assert.match(out, /Showing lines 2-2 of 3/)
+  await read.execute({ file_path: file, limit: 2000 }, {})
+  await writeFile(file, 'x'.repeat(MiB))
+  const exact = await read.execute({ file_path: file }, {})
+  assert.match(exact, /End of file - total 1 lines/)
   await writeFile(file, 'x'.repeat(MiB + 1))
   await assert.rejects(read.execute({ file_path: file }, {}), /line 1 exceeds/)
   await assert.rejects(read.execute({ file_path: file, limit: 2001 }, {}), /limit/)
@@ -126,6 +130,12 @@ test('edit runs in one SSH call and rejects missing, ambiguous and oversized rep
   await writeFile(file, 'x'.repeat(4 * MiB))
   await assert.rejects(edit.execute({ file_path: file, old_string: 'x', new_string: 'xx', replace_all: true }, {}), /edited result exceeds/)
   assert.equal((await stat(file)).size, 4 * MiB)
+  // A result of exactly 4 MiB is allowed; the unique marker keeps old_string
+  // unambiguous while the file stays at the limit.
+  const marker = 'UNIQUE_MARKER_12345'
+  await writeFile(file, marker + 'x'.repeat(4 * MiB - marker.length))
+  await edit.execute({ file_path: file, old_string: marker, new_string: marker }, {})
+  assert.equal((await stat(file)).size, 4 * MiB)
 }))
 
 test('read stops scanning large files after the window but totals exactly at EOF', async () => fixture(async ({ dir, read }) => {
@@ -138,6 +148,16 @@ test('read stops scanning large files after the window but totals exactly at EOF
   assert.doesNotMatch(first, /of \d+\. Use offset/)
   const tail = await read.execute({ file_path: file, offset: count - 1, limit: 5 }, {})
   assert.match(tail, new RegExp(`End of file - total ${count} lines`))
+}))
+
+test('read reports the exact total at exactly the 8 MiB scan boundary', async () => fixture(async ({ dir, read }) => {
+  const file = join(dir, 'exact8')
+  const line = 'L'.repeat(63) + '\n'
+  const count = (8 * MiB) / 64
+  await writeFile(file, line.repeat(count))
+  const out = await read.execute({ file_path: file, offset: count - 2, limit: 3 }, {})
+  assert.match(out, new RegExp(`End of file - total ${count} lines`))
+  assert.match(out, new RegExp(`${count}\\t${'L'.repeat(63)}`))
 }))
 
 test('read, write, and edit refuse non-regular files; writes follow symlinks', async () => fixture(async ({ dir, read, write, edit }) => {
@@ -154,6 +174,19 @@ test('read, write, and edit refuse non-regular files; writes follow symlinks', a
   await write.execute({ file_path: link, content: 'new' }, {})
   assert.equal(await readFile(target, 'utf8'), 'new')
   assert.equal((await lstat(link)).isSymbolicLink(), true)
+}))
+
+test('write accepts a request just under 8 MiB and new files ignore the umask', async () => fixture(async ({ dir, write }) => {
+  const previous = process.umask(0o777)
+  try {
+    const content = 'x'.repeat(8 * MiB - 64)
+    await write.execute({ file_path: join(dir, 'near-limit'), content }, {})
+    const info = await stat(join(dir, 'near-limit'))
+    assert.equal(info.size, content.length)
+    assert.equal(info.mode & 0o777, 0o600, 'explicit 0600 is not masked by the remote umask')
+  } finally {
+    process.umask(previous)
+  }
 }))
 
 test('write and edit reject requests over the 8 MiB JSON budget before execution', async () => {
@@ -178,6 +211,25 @@ test('a path with an unpaired surrogate is rejected before execution', async () 
     /surrogate/,
   )
 }))
+
+test('bash caps foreground stdout at 512 KiB and flags truncation', async () => {
+  const fake = await installFakeSsh()
+  process.env.FAKE_SSH_BIG = String(700 * 1024)
+  process.env.FAKE_SSH_MARK = '0'
+  try {
+    const bash = makeBashTool({ ssh: 'h', name: 'fixture', root: '/', controlPersist: 0 })
+    const out = await bash.execute({ command: 'true' }, {})
+    assert.match(out, /\[stdout truncated; showing the tail\]/)
+    assert.match(out, /\[exit code: 0\]/)
+    const body = out.slice('[stdout truncated; showing the tail]\n'.length, out.indexOf('\n[exit code:'))
+    assert.ok(body.length <= 512 * 1024, `capped (${body.length})`)
+    assert.ok(body.length > 480 * 1024, `not silently tiny (${body.length})`)
+  } finally {
+    delete process.env.FAKE_SSH_BIG
+    delete process.env.FAKE_SSH_MARK
+    await fake.cleanup()
+  }
+})
 
 test('bash rejects NUL and unpaired surrogates in commands and workdir', async () => {
   const bash = makeBashTool({ ssh: 'offline', name: 'fixture', root: '/', controlPersist: 0 })

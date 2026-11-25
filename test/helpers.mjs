@@ -25,7 +25,11 @@ if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE) {
   const mode = process.env.FAKE_SSH_G_MODE
   fs.writeSync(1, mode === 'partial'
     ? 'user testuser\\nhostname foo\\n'
-    : 'hostname h\\nuser testuser\\nport 22\\n')
+    : mode === 'truncated'
+      ? 'hostname h\\nuser testuser\\nport 22'
+      : mode === 'nouser'
+        ? 'hostname h\\nport 22\\n'
+        : 'hostname h\\nuser testuser\\nport 22\\n')
   if (mode === 'partial') {
     // Block without timers or CPU until the resolver's SIGKILL.
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
@@ -148,6 +152,15 @@ const { spawn } = require('node:child_process')
 const argv = process.argv.slice(2)
 if (process.env.FAKE_SSH_LOG) fs.appendFileSync(process.env.FAKE_SSH_LOG, JSON.stringify(argv) + '\\n')
 if (argv.includes('-G')) {
+  // One -G call fails: the first process to unlink the marker exits 1, so a
+  // test can run concurrent sudo calls with mixed resolved/unresolved identity.
+  const failFile = process.env.FAKE_SSH_G_FAIL_FILE
+  if (failFile) {
+    try {
+      fs.unlinkSync(failFile)
+      process.exit(1)
+    } catch {}
+  }
   const host = process.env.FAKE_SSH_IDENTITY_HOST || 'h'
   const user = process.env.FAKE_SSH_IDENTITY_USER || 'testuser'
   const port = process.env.FAKE_SSH_IDENTITY_PORT || '22'

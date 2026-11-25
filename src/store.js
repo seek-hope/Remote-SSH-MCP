@@ -6,7 +6,7 @@
  * keep a single import site.
  */
 
-import { readFile, writeFile, rename, rm, mkdir, readdir, stat } from 'node:fs/promises'
+import { readFile, writeFile, rename, rm, mkdir, readdir, stat, chmod } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { parseTargets } from './target.js'
@@ -58,6 +58,9 @@ export async function saveTargetStore(file, targets) {
   const body = targets.map((t) => ({ ...t, name: t.name, ssh: t.ssh, root: t.root }))
   try {
     await writeFile(tmp, JSON.stringify(body, null, 2) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    // writeFile's mode is masked by the process umask; enforce the documented
+    // 0600 before publishing the file.
+    await chmod(tmp, 0o600)
     await rename(tmp, file)
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {})

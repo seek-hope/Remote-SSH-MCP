@@ -62,10 +62,11 @@ export async function manageTargets(input, storeFile, signal) {
       return { target: target.name, connected: false, detail: 'ControlPersist is disabled; each call uses key/agent authentication.' }
     }
     signal?.throwIfAborted()
-    const result = await sshControl(target, args.action === 'status' ? 'check' : 'exit')
     // Disconnecting is an explicit session teardown: drop this destination's
-    // cached sudo password even if closing the master reports an error.
+    // cached sudo password before attempting to close, so a thrown error (for
+    // example an unwritable control directory) cannot leave it cached.
     if (args.action === 'disconnect') clearCachedSudoPassword(sudoCacheKey(target))
+    const result = await sshControl(target, args.action === 'status' ? 'check' : 'exit')
     if (args.action === 'disconnect' && result.code !== 0 && !/No such file|Connection refused/i.test(result.stderr)) throw new Error(result.stderr || 'Failed to disconnect.')
     return { target: target.name, connected: args.action === 'status' && result.code === 0, detail: (result.stderr || result.stdout).trim() }
   }

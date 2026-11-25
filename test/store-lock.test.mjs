@@ -18,7 +18,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withStoreLock, readTargetStoreStrict as readTargetStore, saveTargetStore, _lockTestHooks } from '../src/store.js'
@@ -581,6 +581,19 @@ test('a target store with a UTF-8 BOM is accepted', async () => {
     await saveTargetStore(file, targets)
     assert.equal((await readTargetStore(file))[0].ssh, 'h')
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the target store is 0600 even under a restrictive umask', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-store-mode-'))
+  const file = join(dir, 'targets.json')
+  const previous = process.umask(0o777)
+  try {
+    await saveTargetStore(file, [])
+    assert.equal((await stat(file)).mode & 0o777, 0o600)
+  } finally {
+    process.umask(previous)
     await rm(dir, { recursive: true, force: true })
   }
 })

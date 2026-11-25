@@ -128,6 +128,20 @@ test('a rejected password is reported, not cached, and no command runs', async (
   }
 })
 
+test('a disabled cache is not used even when an entry is still present', async () => {
+  const h = await harness({ password: 'fakepw' })
+  setCachedSudoPassword(key, Buffer.from('stale'), 60_000)
+  process.env.REMOTE_SSH_SUDO_CACHE_MS = '0'
+  try {
+    const result = await run()
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal((await h.term.readLog()).length, 1, 'the disabled cache was bypassed')
+  } finally {
+    delete process.env.REMOTE_SSH_SUDO_CACHE_MS
+    await h.cleanup()
+  }
+})
+
 test('a stale cached password is dropped and the next call asks again', async () => {
   const h = await harness({ password: 'fakepw' })
   const identity = await resolveSshIdentity(target)
@@ -159,6 +173,23 @@ test('concurrent sudo calls on one destination share a single terminal prompt', 
     assert.equal(b.ok, true, JSON.stringify(b))
     assert.equal((await h.term.readLog()).length, 1, 'one prompt serves both calls')
   } finally {
+    await h.cleanup()
+  }
+})
+
+test('a transient ssh -G failure does not lose a concurrent verified credential', async () => {
+  const h = await harness({ password: 'fakepw' })
+  const failFile = join(h.ssh.dir, 'g-fail-once')
+  await writeFile(failFile, '')
+  process.env.FAKE_SSH_G_FAIL_FILE = failFile
+  try {
+    const results = await Promise.all([run({ command: 'printf a' }), run({ command: 'printf b' })])
+    assert.deepEqual(results.map(r => r.ok), [true, true], JSON.stringify(results))
+    assert.deepEqual(results.map(r => r.stdout), ['a', 'b'])
+    assert.equal((await h.term.readLog()).length, 2, 'one prompt per resolved identity')
+    assert.equal(sudoCacheSize(), 2, 'neither identity slot overwrites the other')
+  } finally {
+    delete process.env.FAKE_SSH_G_FAIL_FILE
     await h.cleanup()
   }
 })
@@ -364,6 +395,20 @@ test('a command that floods stderr and exits or kills itself is still reported a
   }
 })
 
+test('large sudo stdout is tail-truncated with the documented flag', async () => {
+  const h = await harness({ password: 'fakepw' })
+  try {
+    const result = await run({ command: 'python3 -c "import sys; sys.stdout.write(\'A\' * 700000)"' })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(result.stdoutTruncated, true)
+    assert.ok(result.stdout.length <= 512 * 1024, `capped (${result.stdout.length})`)
+    assert.ok(result.stdout.length > 480 * 1024, `not silently tiny (${result.stdout.length})`)
+    assert.ok(result.stdout.endsWith('A'))
+  } finally {
+    await h.cleanup()
+  }
+})
+
 test('a command timeout is reported as a timeout', async () => {
   const h = await harness({ ticket: true })
   try {
@@ -395,6 +440,23 @@ test('disconnect clears the credential even when closing the master fails', asyn
     delete process.env.FAKE_SSH_FAIL_EXIT
     delete process.env.FAKE_SSH_FAIL_STDERR
     await fake.cleanup()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('disconnect clears the credential even when the control directory cannot be created', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'remote-sudo-disconnect-throw-'))
+  const storeFile = join(dir, 'targets.json')
+  const previous = process.env.REMOTE_SSH_CONTROL_DIR
+  process.env.REMOTE_SSH_CONTROL_DIR = '/proc/remote-ssh-no-such-control-dir'
+  try {
+    await saveTargetStore(storeFile, [{ name: 'h', ssh: 'h', root: '/', controlPersist: 43200 }])
+    setCachedSudoPassword(sudoCacheKey({ ssh: 'h' }), Buffer.from('x'))
+    await assert.rejects(manageTargets({ action: 'disconnect', target: 'h' }, storeFile))
+    assert.equal(sudoCacheSize(), 0, 'a thrown close failure still drops the credential')
+  } finally {
+    if (previous === undefined) delete process.env.REMOTE_SSH_CONTROL_DIR
+    else process.env.REMOTE_SSH_CONTROL_DIR = previous
     await rm(dir, { recursive: true, force: true })
   }
 })
