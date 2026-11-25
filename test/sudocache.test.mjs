@@ -106,6 +106,17 @@ test('entries are bound to the resolved SSH identity and their own token', () =>
   clearAllSudoPasswords()
 })
 
+test('the cache keeps at most 32 slots and evicts the earliest expiry', () => {
+  clearAllSudoPasswords()
+  for (let i = 0; i < 32; i++) setCachedSudoPassword(`dest-${i}`, Buffer.from(`p${i}`), 10_000 + i, 1000)
+  assert.equal(sudoCacheSize(), 32)
+  setCachedSudoPassword('dest-new', Buffer.from('new'), 20_000, 1000)
+  assert.equal(sudoCacheSize(), 32)
+  assert.equal(getCachedSudoPassword('dest-0', 1500), undefined, 'the earliest-expiring slot was evicted')
+  assert.equal(getCachedSudoPassword('dest-new', 1500)?.toString(), 'new')
+  clearAllSudoPasswords()
+})
+
 test('an identity-bound entry is not reused when identity resolution fails', () => {
   clearAllSudoPasswords()
   setCachedSudoPassword(key, Buffer.from('x'), 1000, 1000, undefined, 'host\u0000user\u000022')

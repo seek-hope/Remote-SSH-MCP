@@ -47,7 +47,7 @@ export function createServer({ storeFile = process.env.REMOTE_SSH_TARGETS_FILE |
       }
     })
   }
-  register('remote_ssh_targets', 'List/add/update/remove SSH targets or connect/disconnect/check a ControlMaster. add/update verify the remote root and may open a terminal for authentication. Changes apply to the next call. remove deletes only the target configuration, not remote files or jobs. remove/update (on an ssh or port change) and disconnect also drop the target SSH destination\'s cached sudo password. disconnect closes a shared ControlMaster and may interrupt other calls using it. No passwords are accepted or stored in the target configuration.', manageSchema,
+  register('remote_ssh_targets', 'List/add/update/remove SSH targets or connect/disconnect/query the status of a ControlMaster. add/update verify the remote root and may open a terminal for authentication. Changes apply to the next call. remove deletes only the target configuration, not remote files or jobs. remove/update (on an ssh or port change) and disconnect also drop the target SSH destination\'s cached sudo password. disconnect closes a shared ControlMaster and may interrupt other calls using it. No passwords are accepted or stored in the target configuration.', manageSchema,
     (args, signal) => manageTargets(args, storeFile, signal))
 
   for (const make of [makeReadTool, makeWriteTool, makeEditTool, makeGlobTool, makeGrepTool, makeBashTool, makeSudoTool]) {

@@ -33,6 +33,9 @@ if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE === 'split-utf8') {
     Buffer.from([0xc3, 0xa9]),
     Buffer.from('r\\nport 22\\n', 'utf8'),
   ]))
+} else if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE === 'controlpath-truncated') {
+  // A clean close with a controlpath line lacking its terminating newline.
+  fs.writeSync(1, 'controlpath /tmp/remote-ssh-truncated')
 } else if (argv.includes('-G') && process.env.FAKE_SSH_G_MODE) {
   const mode = process.env.FAKE_SSH_G_MODE
   fs.writeSync(1, mode === 'partial'

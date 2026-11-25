@@ -420,7 +420,8 @@ export async function sshExec(opts) {
 /**
  * Like sshExec, but never rejects on the remote exit code: resolves with
  * { code, stdout, stderr } so callers (bash) can report non-zero exits as
- * data. Still rejects on spawn failure, abort, timeout, or missing marker.
+ * data. Still rejects on spawn failure, abort, or missing marker; a timeout
+ * resolves as { timedOut: true }.
  *
  * The remote command is wrapped so the remote exit code rides along as the
  * final stdout line, making the ssh transport exit code always 0 for a
@@ -475,7 +476,8 @@ export async function sshRun(opts) {
 
 /**
  * Run `ssh -O <op>` against a target's ControlPath (op: check|exit).
- * Resolves with { code, stdout, stderr }; never throws.
+ * Resolves with { code, stdout, stderr }; throws only for an invalid op or a
+ * control-directory setup failure.
  */
 export async function sshControl(target, op, timeoutMs = 20_000) {
   if (op !== 'check' && op !== 'exit') throw new Error(`sshControl: unsupported operation "${op}"`)

@@ -22,6 +22,8 @@ import { mkdtemp, writeFile, mkdir, utimes, rm, readdir, readFile, stat } from '
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withStoreLock, readTargetStoreStrict as readTargetStore, saveTargetStore, _lockTestHooks } from '../src/store.js'
+import { manageTargets } from '../src/manage.js'
+import { installFakeSsh } from './helpers.mjs'
 
 const STORE_URL = new URL('../src/store.js', import.meta.url).href
 const OWNER = 'owner'
@@ -594,6 +596,32 @@ test('the target store is 0600 even under a restrictive umask', async () => {
     assert.equal((await stat(file)).mode & 0o777, 0o600)
   } finally {
     process.umask(previous)
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('update compares normalized destinations for the port override', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-manage-port-'))
+  const file = join(dir, 'targets.json')
+  const fake = await installFakeSsh()
+  try {
+    await saveTargetStore(file, [{ name: 'v6', ssh: 'user@::1', port: 2222, root: '/', controlPersist: 0 }])
+    await manageTargets({ action: 'update', target: 'v6', ssh: 'user@[::1]' }, file)
+    let [target] = await readTargetStore(file)
+    assert.equal(target.ssh, 'user@::1')
+    assert.equal(target.port, 2222, 'repeating the same bracketed destination keeps the port')
+
+    await manageTargets({ action: 'update', target: 'v6', ssh: 'other-host' }, file)
+    ;[target] = await readTargetStore(file)
+    assert.equal(target.port, undefined, 'a real ssh change clears the old port override')
+
+    await saveTargetStore(file, [{ name: 'v6', ssh: 'user@::1', port: 2222, root: '/', controlPersist: 0 }])
+    await manageTargets({ action: 'update', target: 'v6', ssh: 'user@[::1]:2200' }, file)
+    ;[target] = await readTargetStore(file)
+    assert.equal(target.ssh, 'user@::1')
+    assert.equal(target.port, 2200, 'an inline port replaces the stored override')
+  } finally {
+    await fake.cleanup()
     await rm(dir, { recursive: true, force: true })
   }
 })

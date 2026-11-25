@@ -25,6 +25,52 @@ import heapq, os, re, stat, sys
 
 pattern, root, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 
+# A glob bracket expression must not match '/', and a backslash inside it
+# escapes the next character (it is not itself a member). Ranges are emitted
+# only for safe single-character endpoints so a literal '-' cannot turn into
+# an unintended regex range.
+CLASS_SPECIAL = set('\\]^-')
+
+def class_escape(ch):
+    return '\\' + ch if ch in CLASS_SPECIAL else ch
+
+def range_safe(ch):
+    return ch != '-' and ch not in CLASS_SPECIAL and ch != '/'
+
+def translate_class(body):
+    negate = body[:1] in ('!', '^')
+    if negate:
+        body = body[1:]
+    tokens = []
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c == '\\' and i + 1 < len(body):
+            tokens.append((body[i + 1], True))
+            i += 2
+        else:
+            tokens.append((c, c != '-'))
+            i += 1
+    members = []
+    i = 0
+    while i < len(tokens):
+        ch, literal = tokens[i]
+        if (i + 2 < len(tokens) and tokens[i + 1][0] == '-' and not tokens[i + 1][1]
+                and range_safe(ch) and range_safe(tokens[i + 2][0])):
+            members.append(class_escape(ch) + '-' + class_escape(tokens[i + 2][0]))
+            i += 3
+            continue
+        if ch == '/':
+            i += 1
+            continue
+        members.append(class_escape(ch))
+        i += 1
+    if negate:
+        return '(?!/)[^/' + ''.join(members) + ']'
+    if not members:
+        return '(?!)'
+    return '(?!/)[' + ''.join(members) + ']'
+
 # Distinguish a missing root from an existing file and from an inaccessible
 # one; a shell [ -d ] check collapses all three into "no such directory".
 try:
@@ -80,13 +126,7 @@ def translate(pat):
             if j == -1:
                 out.append(re.escape(c)); i += 1
             else:
-                cls = pat[i + 1:j]
-                if cls.startswith('!'):
-                    cls = '^' + cls[1:]
-                # The class is inserted verbatim; a backslash would otherwise
-                # become a regex escape that the glob did not request.
-                cls = cls.replace('\\', '\\\\')
-                out.append('[' + cls + ']'); i = j + 1
+                out.append(translate_class(pat[i + 1:j])); i = j + 1
         else:
             out.append(re.escape(c)); i += 1
     return ''.join(out)

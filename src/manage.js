@@ -77,10 +77,12 @@ export async function manageTargets(input, storeFile, signal) {
     if (args.action === 'update' && !before) throw new Error(`No target named "${args.target}".`)
     const fields = Object.fromEntries(Object.keys(targetFields).filter(key => args[key] !== undefined).map(key => [key, args[key]]))
     const entry = { ...before, ...fields }
-    // Keep the stored port when update merely restates the same ssh string;
-    // an inline "host:port" or an explicit port: null still replaces/clears it.
-    const sshChanged = args.ssh !== undefined && args.ssh !== before?.ssh
-    if (args.port === null || (sshChanged && args.port === undefined)) delete entry.port
+    // Keep the stored port when update merely restates the same destination.
+    // Compare normalized forms (bracketed IPv6 is stored without brackets),
+    // and let an inline "host:port" replace the stored override.
+    const incoming = args.ssh !== undefined ? parseTargets([{ ssh: args.ssh, root: '/' }])[0] : undefined
+    const sshChanged = incoming !== undefined && incoming.ssh !== before?.ssh
+    if (args.port === null || (args.port === undefined && (sshChanged || incoming?.port !== undefined))) delete entry.port
     prepared = parseTargets([entry])[0]
     parseTargets([...snapshot.filter(t => args.action === 'add' || t.name !== args.target), prepared])
     // Network and user interaction must not hold the shared configuration lock.

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { buildConnectCommand, openConnectTerminal, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
+import { buildConnectCommand, ensureControlMaster, openConnectTerminal, resolveSshIdentity, sshExec, sshRun, sshSpawn } from '../src/ssh.js'
 import { installFakeSsh } from './helpers.mjs'
 
 test('command and authentication sessions isolate interactive SSH settings but preserve the route and identity', async () => {
@@ -186,10 +186,36 @@ test('Linux terminal detection tries the next launcher after an immediate failur
 })
 
 test('the credential identity resolves host, user and port through ssh -G', async () => {
+  const probe = spawnSync('ssh', ['-G', 'h'], { encoding: 'utf8', timeout: 5000 })
   const identity = await resolveSshIdentity({ ssh: 'h' })
-  if (identity === undefined) return // ssh -G unavailable in this environment
+  assert.equal(identity !== undefined, probe.status === 0, 'resolveSshIdentity must parse a working ssh -G')
+  if (probe.status !== 0) return // ssh -G unavailable in this environment
   const [host, user, port] = identity.split('\u0000')
   assert.ok(host.length > 0)
   assert.ok(user.length > 0)
   assert.match(port, /^\d+$/)
+})
+
+test('a truncated controlpath answer is not used to warm a master', async () => {
+  const fake = await installFakeSsh()
+  const before = { control: process.env.REMOTE_SSH_CONTROL_DIR, mode: process.env.FAKE_SSH_G_MODE, match: process.env.FAKE_SSH_FAIL_MATCH, exit: process.env.FAKE_SSH_FAIL_EXIT }
+  process.env.REMOTE_SSH_CONTROL_DIR = join(fake.dir, 'control')
+  process.env.FAKE_SSH_G_MODE = 'controlpath-truncated'
+  process.env.FAKE_SSH_FAIL_MATCH = '-O'
+  process.env.FAKE_SSH_FAIL_EXIT = '1'
+  try {
+    const result = await ensureControlMaster(
+      { ssh: 'h', name: 'h', port: undefined, controlPersist: 43200 },
+      { interactive: false },
+    )
+    assert.equal(result.ok, false)
+    assert.match(result.error, /ControlPath/)
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      const name = { control: 'REMOTE_SSH_CONTROL_DIR', mode: 'FAKE_SSH_G_MODE', match: 'FAKE_SSH_FAIL_MATCH', exit: 'FAKE_SSH_FAIL_EXIT' }[key]
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    await fake.cleanup()
+  }
 })

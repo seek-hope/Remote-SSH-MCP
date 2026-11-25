@@ -269,15 +269,21 @@ test('grep classifies non-regular and inaccessible roots without blocking', asyn
 test('glob bracket classes handle a literal ] and reject invalid ranges cleanly', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'remote-ssh-glob-class-'))
   try {
-    await writeFile(join(dir, '].txt'), '')
-    await writeFile(join(dir, 'a.txt'), '')
+    for (const name of ['].txt', 'a.txt', 'b.txt', 'y.txt', 'z.txt', '-.txt']) await writeFile(join(dir, name), '')
+    await mkdir(join(dir, 'top', 'sub'), { recursive: true })
+    await writeFile(join(dir, 'top', 'sub', 'x'), '')
     const run = (pattern) => {
       const parts = execFileSync('python3', ['-c', GLOB_PY, pattern, dir, '100'], { encoding: 'utf8' }).split('\0')
       parts.pop()
       return parts.filter(Boolean).sort()
     }
     assert.deepEqual(run('[]].txt'), [join(dir, '].txt')])
-    assert.deepEqual(run('[!]].txt'), [join(dir, 'a.txt')])
+    assert.deepEqual(run('[!]].txt'), [join(dir, 'a.txt'), join(dir, 'b.txt'), join(dir, 'y.txt'), join(dir, 'z.txt'), join(dir, '-.txt')].sort())
+    // A backslash-escaped '-' is a literal member, not a range endpoint.
+    assert.deepEqual(run('[a\\-z].txt'), [join(dir, '-.txt'), join(dir, 'a.txt'), join(dir, 'z.txt')].sort())
+    // Bracket classes never consume a path separator.
+    assert.deepEqual(run('top[!a]sub/x'), [])
+    assert.deepEqual(run('top[/]sub/x'), [])
     let failure
     try {
       execFileSync('python3', ['-c', GLOB_PY, '[z-a]', dir, '100'], { encoding: 'utf8' })
